@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "strava": {
+      "type": "local",
+      "command": ["/home/augusto/dev/tito/strava-mcp-server/.venv/bin/python", "/home/augusto/dev/tito/strava-mcp-server/src/strava_server.py"],
+      "enabled": true
+    }
+  }
+}
