@@ -1,0 +1,8 @@
+.venv/
+.strava-chromium/
+.strava-chrome/
+downloads/strava/
+__pycache__/
+*.py[cod]
+.cycling/
+.ruff_cache/
