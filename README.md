@@ -66,9 +66,33 @@ Context revisions are append-only. RPE never adds to a power/HR load for the sam
 activity. `activity analyze --rpe 6` is a temporary what-if override instead.
 Exit codes: 0 success, 1 per-file/reprocess failures, 2 invalid request.
 
+### Refresh or remove catalog data
+
+`reprocess` recomputes metric snapshots from normalized Parquet. It does not
+reparse FIT/TCX files or remove activities from the catalog. When the original
+files are available, force normalization first:
+
+```bash
+uv run python -m cycling --data-dir .cycling ingest downloads/strava --force
+uv run python -m cycling --data-dir .cycling reprocess --metric all --from 2026-08-01
+```
+
+To remove one stale activity, find its catalog ID by source name and delete it:
+
+```bash
+ID=$(uv run python -m cycling --data-dir .cycling activities list |
+  uv run python -c 'import json,sys; activities=json.load(sys.stdin)["data"]["activities"]; print(next(a["id"] for a in activities if "20146933314" in a.get("source_name", "")))')
+uv run python -m cycling --data-dir .cycling activity delete "$ID"
+```
+
+Deletion removes the catalog row, derived metrics, context and normalized
+Parquet. It never deletes original downloads. HR distribution is computed live;
+`Unknown HR time` means the normalized activity contains missing or invalid HR,
+and can only be repaired by re-ingesting an original file that contains HR.
+
 ## Declared athlete settings
 
-Initial profile defaults: FTP 285 W, LTHR 157 bpm, max HR 181 bpm, weight 75 kg,
+Initial profile defaults: FTP 285 W, LTHR 155 bpm, max HR 181 bpm, weight 75 kg,
 effective **2026-01-01**. These are declared assumptions, not historical measurements.
 Historical mode selects settings effective on the activity's UTC date. Current mode
 uses settings effective today. Earlier recordings have no threshold-based metrics
@@ -77,8 +101,9 @@ until you declare suitable settings. Estimates never change settings automatical
 Create a JSON file, for example `settings.json`:
 
 ```json
-{"effective_date": "2026-09-01", "ftp_w": 295, "lthr_bpm": 157,
- "max_hr_bpm": 181, "weight_kg": 75, "notes": "Declared FTP update"}
+{"effective_date": "2026-09-01", "ftp_w": 295, "lthr_bpm": 155,
+  "hr_load_factor": 0.692, "max_hr_bpm": 181, "weight_kg": 75,
+  "notes": "Declared FTP update"}
 ```
 
 ```bash
@@ -113,7 +138,9 @@ They expose private activity/GPS data and are not designed for public deployment
   are excluded. Power curves are best observed efforts, not proven maximal ability.
 - Durability compares observed powers after recorded work, with strict complete
   energy coverage; it is not a controlled test of physiological fatigue resistance.
-- HR load is an approximation, not TRIMP. Mixing HR, power and RPE scales lowers
+- HR load is an approximation, not TRIMP. When `hr_load_factor` is declared, it
+  scales the raw HR load against paired power-reference sessions. Mixing HR, power
+  and RPE scales lowers
   longitudinal comparability. CTL/ATL initialize at zero; missing days are not proven rest.
 - Strict drift detection often returns unavailable outdoors. Read coverage and flags.
 - Idempotent ingestion deduplicates identical bytes, not independently encoded copies

@@ -45,6 +45,8 @@ DURABILITY_STATE_LABELS = (
     (2100.0, "Late-race"),
     (float("inf"), "Deep fatigue"),
 )
+OVERVIEW_PERIODS = ("7d", "21d", "30d", "90d", "365d", "all")
+OVERVIEW_DURABILITY_MIN_DURATION_S = 90 * 60
 
 LOAD_CURVE_EXPLANATION = (
     "CTL (fitness) is a 42-day exponentially weighted average of daily load; "
@@ -143,7 +145,10 @@ def _power_curve_figure(
             "tickvals": [_power_curve_position(duration) for duration, _ in ticks],
             "ticktext": [label for _, label in ticks],
         },
-        yaxis_title="Best observed power (W)",
+        yaxis={
+            "title": "Best observed power (W)",
+            "rangemode": "tozero",
+        },
     )
 
 
@@ -210,7 +215,9 @@ def _aerobic_durability_plot_payload(data: dict) -> dict:
     }
 
 
-def _render_hr_distribution(st, go, data: dict, no_data_message: str) -> None:
+def _render_hr_distribution(
+    st, go, data: dict, no_data_message: str, show_table: bool = True
+) -> None:
     st.caption(
         "Basis: percentage of known heart-rate time; missing or unclassified samples are unknown."
     )
@@ -243,7 +250,8 @@ def _render_hr_distribution(st, go, data: dict, no_data_message: str) -> None:
         }
         for index, zone in enumerate(zones)
     ]
-    st.dataframe(table_data)
+    if show_table:
+        st.dataframe(table_data)
 
     chart = go.Figure(
         go.Bar(
@@ -260,10 +268,64 @@ def _render_hr_distribution(st, go, data: dict, no_data_message: str) -> None:
     st.plotly_chart(chart, width="stretch")
 
 
+def _render_performance_durability(st, go, result_payload: dict) -> None:
+    data = result_payload.get("data", {})
+    st.warning(
+        "Observed efforts by prior work; not a controlled fatigue test. "
+        "Missing-power MTB has no power durability."
+    )
+    if not data.get("available", True):
+        st.warning(
+            f"Durability unavailable: {data.get('reason', 'Missing power data')}"
+        )
+        return
+
+    plot = _durability_plot_payload(data)
+    durations = plot["durations_s"]
+
+    fig_ret = go.Figure()
+    for duration in durations:
+        fig_ret.add_trace(
+            go.Scatter(
+                x=plot["x_labels"],
+                y=plot["retention"][duration],
+                mode="lines+markers",
+                name=_format_power_curve_duration(duration),
+                connectgaps=False,
+            )
+        )
+    fig_ret.update_layout(
+        title="Power Retention vs Accumulated Work",
+        xaxis_title="Accumulated Work",
+        yaxis_title="Power Retention (%)",
+        yaxis=dict(range=[0, 110]),
+    )
+    st.plotly_chart(fig_ret, width="stretch")
+
+    fig_hm = go.Figure(
+        data=go.Heatmap(
+            z=plot["heatmap_values"],
+            x=plot["x_labels"],
+            y=[_format_power_curve_duration(duration) for duration in durations],
+            text=plot["heatmap_text"],
+            texttemplate="%{text}",
+            textfont={"size": 12},
+            colorscale="Viridis",
+            showscale=True,
+        )
+    )
+    fig_hm.update_layout(
+        title="Power Retention Heatmap",
+        xaxis_title="Work Threshold",
+        yaxis_title="Duration",
+    )
+    st.plotly_chart(fig_hm, width="stretch")
+
+
 def _period_filter(st, activities: list[dict], key: str):
     period = st.selectbox(
         "Period",
-        ["30d", "90d", "365d", "all", "Custom range"],
+        ["7d", "21d", "30d", "90d", "365d", "all", "Custom range"],
         key=f"{key}_period",
     )
     if period != "Custom range":
@@ -319,72 +381,158 @@ def run():
             return
 
         if page == "Overview":
-            st.subheader("System Status")
-            try:
-                st.json(service.status().model_dump(mode="json"))
-            except Exception as exc:
-                st.error(f"Status unavailable: {exc}")
+            load_result = None
+            power_result = None
+            hr_result = None
+            durability_payload = None
 
-            st.subheader("Recent Activities")
-            st.dataframe(activities[:10])
-
-            modalities = sorted(
-                {a.get("modality", "unknown") for a in activities if a.get("modality")}
-            )
-            st.subheader("Global Load (all modalities)")
-            end = datetime.now(UTC).date()
-            start = end - timedelta(days=90)
+            st.subheader("CTL")
             try:
-                global_load = service.load(
+                end = datetime.now(UTC).date()
+                start = end - timedelta(days=90)
+                load_result = service.load(
                     LoadRequest(
                         start=start, end=end, modality="all", parameter_mode=mode
                     )
                 )
-                global_days = global_load.data.get("days", [])
+                global_days = load_result.data.get("days", [])
                 if global_days:
                     last_day = global_days[-1]
-                    st.metric(
-                        label="Global Load (CTL/ATL/TSB)",
-                        value=f"CTL {last_day.get('ctl', 0):.1f}",
-                        delta=f"TSB {last_day.get('tsb', 0):.1f}",
+                    max_ctl = max(
+                        (float(day.get("ctl") or 0) for day in global_days),
+                        default=0.0,
                     )
-                    st.markdown(LOAD_CURVE_EXPLANATION)
-                    chart = go.Figure()
-                    for metric in ("ctl", "atl", "tsb"):
-                        chart.add_scatter(
-                            x=[d["date"] for d in global_days],
-                            y=[d.get(metric) for d in global_days],
-                            name=metric.upper(),
+                    st.metric(
+                        label="Global CTL",
+                        value=f"{last_day.get('ctl', 0):.1f}",
+                    )
+                    chart = go.Figure(
+                        go.Scatter(
+                            x=[day["date"] for day in global_days],
+                            y=[day.get("ctl") for day in global_days],
+                            name="CTL",
+                            mode="lines",
                         )
+                    )
                     chart.update_layout(
+                        title="Chronic Training Load (42-day)",
                         xaxis_title="Date",
-                        yaxis_title="Load",
+                        yaxis_title="CTL",
+                        yaxis={"range": [0, max(1.0, max_ctl * 1.05)]},
                     )
                     st.plotly_chart(chart, width="stretch")
                 else:
-                    st.info("No load data available for the selected period.")
+                    st.info("No CTL data available for the selected period.")
             except Exception as exc:
-                st.error(f"Global load unavailable: {exc}")
+                st.error(f"CTL unavailable: {exc}")
 
-            if modalities:
-                st.subheader("Load by modality")
-                for mod in modalities:
-                    try:
-                        load_res = service.load(
-                            LoadRequest(
-                                start=start, end=end, modality=mod, parameter_mode=mode
-                            )
+            st.subheader("Power Curve and Heart Rate Distribution")
+            overview_period = st.selectbox(
+                "Period",
+                OVERVIEW_PERIODS,
+                index=0,
+                key="overview_period",
+            )
+            power_col, hr_col = st.columns(2)
+            with power_col.container(border=True, height="stretch"):
+                st.markdown("#### Power Curve")
+                try:
+                    power_result = service.period_power_curve(
+                        PeriodPowerCurveRequest(period=overview_period, modality="all")
+                    )
+                    watts = power_result.data.get("watts", {})
+                    chart = _power_curve_figure(
+                        go, watts, power_result.data.get("durations_s")
+                    )
+                    if chart is not None:
+                        chart.update_layout(
+                            title=f"Power Curve ({overview_period})",
+                            height=600,
                         )
-                        days = load_res.data.get("days", [])
-                        if days:
-                            last_day = days[-1]
-                            st.metric(
-                                label=f"{mod.upper()} Load (CTL/ATL/TSB)",
-                                value=f"CTL {last_day.get('ctl', 0):.1f}",
-                                delta=f"TSB {last_day.get('tsb', 0):.1f}",
-                            )
-                    except Exception:
-                        pass
+                        st.plotly_chart(chart, width="stretch")
+                    else:
+                        st.warning("No power data found for the selected period.")
+                except Exception as exc:
+                    st.error(f"Power curve unavailable: {exc}")
+
+            with hr_col.container(border=True, height="stretch"):
+                st.markdown("#### Heart Rate Distribution")
+                try:
+                    hr_result = service.period_hr_distribution(
+                        PeriodHRDistributionRequest(
+                            period=overview_period,
+                            modality="all",
+                            parameter_mode=mode,
+                        )
+                    )
+                    _render_hr_distribution(
+                        st,
+                        go,
+                        hr_result.data,
+                        "No heart rate data found for the selected period.",
+                        show_table=False,
+                    )
+                except Exception as exc:
+                    st.error(f"Heart rate distribution unavailable: {exc}")
+
+            st.subheader("Durability")
+            try:
+                durability_activity = service.latest_activity_with_power_and_hr(
+                    OVERVIEW_DURABILITY_MIN_DURATION_S
+                )
+                if durability_activity is None:
+                    st.info(
+                        "No workout with power, heart rate, and at least 1h30m found."
+                    )
+                else:
+                    activity_label = durability_activity.get(
+                        "source_name", durability_activity["id"]
+                    )
+                    st.caption(
+                        "Latest qualifying workout: "
+                        f"{durability_activity.get('start_time', 'N/A')} · {activity_label}"
+                    )
+                    request = DurabilityRequest(activity_id=durability_activity["id"])
+                    with st.spinner("Computing durability..."):
+                        durability_payload = _cached_performance_durability(
+                            settings.data_dir,
+                            durability_activity["id"],
+                            tuple(request.durations),
+                            tuple(request.thresholds_kj),
+                        )
+                    _render_performance_durability(st, go, durability_payload)
+            except Exception as exc:
+                st.error(f"Durability unavailable: {exc}")
+
+            st.subheader("Recent Activities")
+            st.dataframe(activities[:10])
+
+            st.subheader("JSONs")
+            status_payload = None
+            try:
+                status_payload = service.status().model_dump(mode="json")
+            except Exception as exc:
+                st.error(f"Status unavailable: {exc}")
+            json_results = (
+                ("Status", status_payload),
+                (
+                    "CTL",
+                    load_result.model_dump(mode="json") if load_result else None,
+                ),
+                (
+                    "Power Curve",
+                    power_result.model_dump(mode="json") if power_result else None,
+                ),
+                (
+                    "Heart Rate Distribution",
+                    hr_result.model_dump(mode="json") if hr_result else None,
+                ),
+                ("Durability", durability_payload),
+            )
+            for label, payload in json_results:
+                if payload is not None:
+                    with st.expander(label):
+                        st.json(payload)
             return
 
         if page == "Calendar":
@@ -620,55 +768,7 @@ def run():
                             tuple(request.durations),
                             tuple(request.thresholds_kj),
                         )
-                    st.warning(
-                        "Observed efforts by prior work; not a controlled fatigue test. Missing-power MTB has no power durability."
-                    )
-                    data = result_payload["data"]
-                    if not data.get("available", True):
-                        st.warning(
-                            f"Durability unavailable: {data.get('reason', 'Missing power data')}"
-                        )
-                    else:
-                        plot = _durability_plot_payload(data)
-                        durations = plot["durations_s"]
-
-                        fig_ret = go.Figure()
-                        for d in durations:
-                            fig_ret.add_trace(
-                                go.Scatter(
-                                    x=plot["x_labels"],
-                                    y=plot["retention"][d],
-                                    mode="lines+markers",
-                                    name=_format_power_curve_duration(d),
-                                    connectgaps=False,
-                                )
-                            )
-                        fig_ret.update_layout(
-                            title="Power Retention vs Accumulated Work",
-                            xaxis_title="Accumulated Work",
-                            yaxis_title="Power Retention (%)",
-                            yaxis=dict(range=[0, 110]),
-                        )
-                        st.plotly_chart(fig_ret, width="stretch")
-
-                        fig_hm = go.Figure(
-                            data=go.Heatmap(
-                                z=plot["heatmap_values"],
-                                x=plot["x_labels"],
-                                y=[_format_power_curve_duration(d) for d in durations],
-                                text=plot["heatmap_text"],
-                                texttemplate="%{text}",
-                                textfont={"size": 12},
-                                colorscale="Viridis",
-                                showscale=True,
-                            )
-                        )
-                        fig_hm.update_layout(
-                            title="Power Retention Heatmap",
-                            xaxis_title="Work Threshold",
-                            yaxis_title="Duration",
-                        )
-                        st.plotly_chart(fig_hm, width="stretch")
+                    _render_performance_durability(st, go, result_payload)
                     st.json(result_payload)
                 else:
                     st.caption(AEROBIC_DURABILITY_EXPLANATION)

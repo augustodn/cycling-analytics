@@ -11,6 +11,7 @@ from cycling.analytics.load import calculate_session_load
 class DummyParams:
     ftp_w: float = 200.0
     lthr_bpm: float = 160.0
+    hr_load_factor: float = 1.0
 
 
 def make_samples(power=200, hr=140, count=3600):
@@ -41,6 +42,16 @@ def test_training_load_hr_fallback():
     assert res["source"] == "hr"
     # HR=160, LTHR=160 -> sum((160/160)^2 * 3600)/3600 * 100 = 100
     assert pytest.approx(res["value"], rel=1e-5) == 100.0
+
+
+def test_training_load_hr_calibration_factor():
+    samples = make_samples(power=None, hr=160, count=3600)
+    res = calculate_session_load(
+        samples, DummyParams(lthr_bpm=160.0, hr_load_factor=0.692), rpe=None
+    )
+    assert res["source"] == "hr"
+    assert pytest.approx(res["value"], rel=1e-5) == 69.2
+    assert "calibrated factor=0.692" in res["reason"]
 
 
 def test_training_load_rpe_fallback():

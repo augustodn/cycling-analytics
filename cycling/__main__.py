@@ -101,7 +101,9 @@ def parser():
         ],
     )
     pc.add_argument(
-        "--period", choices=["30d", "90d", "365d", "all", "custom"], default="all"
+        "--period",
+        choices=["7d", "21d", "30d", "90d", "365d", "all", "custom"],
+        default="all",
     )
     pc.add_argument(
         "--modality",
@@ -138,7 +140,9 @@ def parser():
             sub.add_argument("--max-points", type=int, default=2000)
     power_curves = commands.add_parser("power-curves")
     power_curves.add_argument(
-        "--period", choices=["30d", "90d", "365d", "all", "custom"], default="all"
+        "--period",
+        choices=["7d", "21d", "30d", "90d", "365d", "all", "custom"],
+        default="all",
     )
     power_curves.add_argument(
         "--modality",

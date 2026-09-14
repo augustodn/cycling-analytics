@@ -373,7 +373,7 @@ class ServiceTests(unittest.TestCase):
             ):
                 response = client.post(f"/{endpoint}", json={"activity_id": ident})
                 self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json()["algorithm_version"], "mvp-2")
+                self.assertEqual(response.json()["algorithm_version"], "mvp-3")
             self.assertEqual(
                 client.post("/activity", json={"activity_id": "missing"}).status_code,
                 404,
@@ -433,6 +433,42 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertIsNone(res_mtb.data["watts"]["5"])
         self.assertIsNone(res_mtb.data["records"]["5"])
+
+    def test_short_periods_and_latest_sensor_activity(self):
+        self.assertEqual(
+            PeriodPowerCurveRequest(period="7d").period,
+            "7d",
+        )
+        self.assertEqual(
+            PeriodHRDistributionRequest(period="21d").period,
+            "21d",
+        )
+
+        activity = {
+            "id": "latest",
+            "start_time": "2026-01-02T00:00:00Z",
+            "duration_s": 5400,
+        }
+        with (
+            patch.object(self.store, "activities", return_value=[activity]),
+            patch.object(
+                self.store,
+                "samples",
+                return_value=[
+                    {
+                        "elapsed_s": 0,
+                        "active": True,
+                        "segment": 0,
+                        "power_w": 200,
+                        "hr_bpm": 140,
+                    }
+                ],
+            ),
+        ):
+            self.assertEqual(
+                self.service.latest_activity_with_power_and_hr(),
+                activity,
+            )
 
     def test_custom_period_filter_is_inclusive(self):
         ident = self.ingest()

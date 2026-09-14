@@ -74,6 +74,7 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIsNotNone(chart)
         self.assertEqual(chart.layout.xaxis.type, "linear")
+        self.assertEqual(chart.layout.yaxis.rangemode, "tozero")
         self.assertEqual(
             list(chart.layout.xaxis.ticktext),
             ["1s", "15s", "1m", "5m", "10m", "20m"],

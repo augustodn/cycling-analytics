@@ -71,6 +71,9 @@ def calculate_session_load(
         ftp = None
     if not _is_finite_number(lthr):
         lthr = None
+    hr_load_factor = getattr(parameters, "hr_load_factor", 1.0) if parameters else 1.0
+    if not _is_finite_number(hr_load_factor) or hr_load_factor <= 0:
+        hr_load_factor = 1.0
     if not _is_finite_number(rpe):
         rpe = None
 
@@ -98,12 +101,16 @@ def calculate_session_load(
                 (active_seconds / 3600.0)
                 * (sum((h / lthr) ** 2 for h in valid_hrs) / len(valid_hrs))
                 * 100.0
+                * hr_load_factor
             )
             return LoadResult(
                 value=val,
                 source="hr",
                 unit="approximate stress points",
-                reason=f"HR coverage >= {int(min_coverage * 100)}%; approximate, not TRIMP",
+                reason=(
+                    f"HR coverage >= {int(min_coverage * 100)}%; "
+                    f"calibrated factor={hr_load_factor:.3f}; approximate, not TRIMP"
+                ),
             ).to_dict()
 
     # Tier 3: RPE Load

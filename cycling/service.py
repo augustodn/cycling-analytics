@@ -22,6 +22,8 @@ from cycling.models import (
 )
 from cycling.storage import Store, encode, now
 
+PERIOD_DAYS = {"7d": 7, "21d": 21, "30d": 30, "90d": 90, "365d": 365}
+
 
 def _filter_period_activities(
     activities: list[dict[str, Any]],
@@ -55,7 +57,7 @@ def _filter_period_activities(
         return selected
 
     ref_date = end_date or max(activity_dates.values())
-    cutoff = ref_date - timedelta(days={"30d": 30, "90d": 90, "365d": 365}[period])
+    cutoff = ref_date - timedelta(days=PERIOD_DAYS[period])
     return [
         activity
         for activity in selected
@@ -89,6 +91,30 @@ class CyclingService:
 
     def list_activities(self):
         return self.result("activities", {"activities": self.store.activities()})
+
+    def latest_activity_with_power_and_hr(self, minimum_duration_s: int = 5400):
+        """Return newest long activity containing both sensor streams."""
+        if minimum_duration_s < 1:
+            raise ValueError("minimum_duration_s must be positive")
+
+        for activity in self.store.activities():
+            try:
+                duration_s = float(activity.get("duration_s") or 0)
+            except (TypeError, ValueError):
+                continue
+            if duration_s < minimum_duration_s:
+                continue
+
+            try:
+                samples = self.store.samples(activity["id"])
+            except FileNotFoundError:
+                continue
+            active_seconds = len(analytics.filter_active(samples))
+            power = analytics.calculate_coverage(samples, "power_w", active_seconds)
+            heart_rate = analytics.calculate_coverage(samples, "hr_bpm", active_seconds)
+            if power.seconds > 0 and heart_rate.seconds > 0:
+                return activity
+        return None
 
     def get_activity(self, request: ActivityRequest):
         activity, ident, parameters = self.settings(request)

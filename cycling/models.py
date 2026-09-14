@@ -14,7 +14,8 @@ class Contract(BaseModel):
 class AthleteParameters(Contract):
     effective_date: date = date(2026, 1, 1)
     ftp_w: float = Field(default=285, gt=0, le=1000)
-    lthr_bpm: float = Field(default=157, gt=0, le=240)
+    lthr_bpm: float = Field(default=155, gt=0, le=240)
+    hr_load_factor: float = Field(default=1.0, gt=0, le=5)
     max_hr_bpm: float = Field(default=181, gt=0, le=250)
     weight_kg: float = Field(default=75, gt=0, le=300)
     power_zone_fractions: list[float] = [0.55, 0.75, 0.90, 1.05, 1.20]
@@ -129,7 +130,7 @@ class CurveRequest(ActivityRequest):
 
 
 class PeriodPowerCurveRequest(Contract):
-    period: Literal["30d", "90d", "365d", "all", "custom"] = "all"
+    period: Literal["7d", "21d", "30d", "90d", "365d", "all", "custom"] = "all"
     modality: Literal["indoor", "road", "mtb", "gravel", "unknown", "all"] = "all"
     durations: list[int] = Field(
         default=[
@@ -180,7 +181,7 @@ class PeriodPowerCurveRequest(Contract):
 
 
 class PeriodHRDistributionRequest(Contract):
-    period: Literal["30d", "90d", "365d", "all", "custom"] = "all"
+    period: Literal["7d", "21d", "30d", "90d", "365d", "all", "custom"] = "all"
     modality: Literal["indoor", "road", "mtb", "gravel", "unknown", "all"] = "all"
     parameter_mode: Literal["historical", "current"] = "historical"
     start_date: date | None = None

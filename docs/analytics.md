@@ -37,7 +37,7 @@ flowchart TD
     Start[Calculate Activity Load] --> CheckPower{Power Coverage >= 90%?}
     CheckPower -- Yes --> PowerLoad["Power Load = hours * IF^2 * 100 (Scale: TSS-equivalent)"]
     CheckPower -- No --> CheckHR{HR Coverage >= 90%?}
-    CheckHR -- Yes --> HRLoad["HR Load = hours * mean((HR/LTHR)^2) * 100 (Scale: HR-stress)"]
+    CheckHR -- Yes --> HRLoad["HR Load = hours * mean((HR/LTHR)^2) * 100 * calibration factor (Scale: HR-stress)"]
     CheckHR -- No --> CheckRPE{User RPE Declared?}
     CheckRPE -- Yes --> RPELoad["RPE Load = duration_minutes * User_RPE (Scale: sRPE)"]
     CheckRPE -- No --> NoLoad["Load = UNAVAILABLE (Reason: Insufficient sensor & context data)"]
@@ -48,8 +48,11 @@ flowchart TD
   $$L_{\text{power}} = \left( \frac{\text{Active Duration Seconds}}{3600} \right) \cdot IF^2 \cdot 100$$
 - **Tier 2: Heart Rate Load ($L_{\text{hr}}$)**
   Used when power coverage $< 90\%$ and HR coverage $\ge 90\%$ (e.g., no-power MTB ride with HR monitor).
-  $$L_{\text{hr}} = \left( \frac{\text{Active Duration Seconds}}{3600} \right) \cdot \text{mean}\left( \left( \frac{HR_t}{LTHR} \right)^2 \right) \cdot 100$$
-  *Note:* $L_{\text{hr}}$ is an explicit relative HR stress score, not Banister TRIMP or HR-TSS.
+   $$L_{\text{hr}} = \left( \frac{\text{Active Duration Seconds}}{3600} \right) \cdot \text{mean}\left( \left( \frac{HR_t}{LTHR} \right)^2 \right) \cdot 100 \cdot k_{hr}$$
+   where $k_{hr}$ is an optional empirical calibration factor derived from paired
+   power and HR sessions. The current profile uses $k_{hr}=0.692$ from sessions
+   dated 2026-09-04 onward. *Note:* $L_{\text{hr}}$ is an explicit relative HR
+   stress score, not Banister TRIMP or HR-TSS.
 - **Tier 3: Session RPE Load ($L_{\text{rpe}}$)**
   Used when both power and HR coverage $< 90\%$, provided user declared a session RPE ($0.0 - 10.0$).
   $$L_{\text{rpe}} = \text{Active Duration Minutes} \cdot \text{User RPE}$$
