@@ -254,9 +254,13 @@ class ServiceTests(unittest.TestCase):
             rows([100] * 10 + [300] * 10),
         )
 
-        result = self.service.durability(
-            DurabilityRequest(activity_id="target", durations=[5], thresholds_kj=[0.5])
-        )
+        with patch.object(self.store, "samples", wraps=self.store.samples) as samples:
+            result = self.service.durability(
+                DurabilityRequest(
+                    activity_id="target", durations=[5, 6], thresholds_kj=[0.5]
+                )
+            )
+        self.assertEqual(samples.call_count, 2)
         assert result.data["fresh_reference"]["5"]["activity_id"] == "historical"
         assert result.data["fresh_reference"]["5"]["source"] == "historical_90d"
 

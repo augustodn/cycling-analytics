@@ -65,6 +65,7 @@ def parser():
     context.add_argument(
         "--modality", choices=["road", "mtb", "gravel", "indoor", "unknown"]
     )
+    activity.add_parser("delete").add_argument("activity_id")
     pc = commands.add_parser("power-curve")
     pc.add_argument("activity_id", nargs="?")
     pc.add_argument(
@@ -277,7 +278,9 @@ def main(argv=None):
                         acts = acts[: args.limit]
                     result.data["activities"] = acts
             elif command == "activity":
-                if args.action == "set-context":
+                if args.action == "delete":
+                    result = store.delete_activity(args.activity_id)
+                elif args.action == "set-context":
                     result = service.set_context(
                         args.activity_id,
                         ActivityContext(rpe=args.rpe, modality=args.modality),

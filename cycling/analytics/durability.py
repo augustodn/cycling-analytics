@@ -275,22 +275,42 @@ def calculate_fresh_reference_single(
     activity_duration_s: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """Find the best observed window beginning within the fresh-work range."""
+    return calculate_fresh_references(
+        samples,
+        (duration_s,),
+        activity_id=activity_id,
+        activity_date=activity_date,
+        activity_duration_s=activity_duration_s,
+    ).get(duration_s)
+
+
+def calculate_fresh_references(
+    samples: Sequence[Dict[str, Any]],
+    durations_s: Sequence[int],
+    activity_id: Optional[str] = None,
+    activity_date: Optional[str] = None,
+    activity_duration_s: Optional[float] = None,
+) -> Dict[int, Dict[str, Any]]:
+    """Find fresh-work references for multiple durations in one stream pass."""
     runs, _, _, _, _ = _intervals(samples, activity_duration_s)
-    best = _best_window(
-        runs,
-        duration_s,
-        maximum_start_work_j=FRESH_MAX_START_WORK_KJ * 1000.0,
-    )
-    if best is None:
-        return None
-    return {
-        "power_w": best["power_w"],
-        "activity_id": activity_id,
-        "date": activity_date,
-        "start_work_kj": best["start_work_kj"],
-        "start_offset_s": best["start_s"],
-        "source": "activity_fresh" if activity_id else "single_activity",
-    }
+    references = {}
+    for duration_s in durations_s:
+        best = _best_window(
+            runs,
+            duration_s,
+            maximum_start_work_j=FRESH_MAX_START_WORK_KJ * 1000.0,
+        )
+        if best is None:
+            continue
+        references[duration_s] = {
+            "power_w": best["power_w"],
+            "activity_id": activity_id,
+            "date": activity_date,
+            "start_work_kj": best["start_work_kj"],
+            "start_offset_s": best["start_s"],
+            "source": "activity_fresh" if activity_id else "single_activity",
+        }
+    return references
 
 
 def _empty_result(

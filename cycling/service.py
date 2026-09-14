@@ -5,7 +5,7 @@ from math import ceil
 from typing import Any
 
 from cycling import ALGORITHM_VERSION, analytics
-from cycling.analytics.durability import calculate_fresh_reference_single
+from cycling.analytics.durability import calculate_fresh_references
 from cycling.analytics.zones import HR_ZONE_DEFINITIONS
 from cycling.models import (
     ActivityContext,
@@ -236,24 +236,32 @@ class CyclingService:
                 act_date - timedelta(days=90),
                 act_date,
             )
-            for duration_s in request.durations:
-                best_hist = None
-                for candidate in recent_acts:
-                    if candidate["id"] == request.activity_id:
-                        continue
-                    reference = calculate_fresh_reference_single(
-                        self.store.samples(candidate["id"]),
-                        duration_s,
-                        activity_id=candidate["id"],
-                        activity_date=candidate.get("start_time"),
-                        activity_duration_s=candidate.get("duration_s"),
-                    )
-                    if reference and (
-                        best_hist is None or reference["power_w"] > best_hist["power_w"]
-                    ):
-                        best_hist = {**reference, "source": "historical_90d"}
-                if best_hist is not None:
-                    historical_fresh_refs[duration_s] = best_hist
+            best_historical = {duration_s: None for duration_s in request.durations}
+            for candidate in recent_acts:
+                if candidate["id"] == request.activity_id:
+                    continue
+                if "missing_power_w" in candidate.get("quality_flags", []):
+                    continue
+                candidate_samples = self.store.samples(candidate["id"])
+                references = calculate_fresh_references(
+                    candidate_samples,
+                    request.durations,
+                    activity_id=candidate["id"],
+                    activity_date=candidate.get("start_time"),
+                    activity_duration_s=candidate.get("duration_s"),
+                )
+                for duration_s, reference in references.items():
+                    best_hist = best_historical[duration_s]
+                    if best_hist is None or reference["power_w"] > best_hist["power_w"]:
+                        best_historical[duration_s] = {
+                            **reference,
+                            "source": "historical_90d",
+                        }
+            historical_fresh_refs = {
+                duration_s: reference
+                for duration_s, reference in best_historical.items()
+                if reference is not None
+            }
 
         data = analytics.durability(
             samples,

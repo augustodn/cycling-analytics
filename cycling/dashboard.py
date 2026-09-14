@@ -3,6 +3,8 @@
 import argparse
 from datetime import UTC, date, datetime, timedelta
 
+import streamlit as st
+
 from cycling.models import (
     ActivityRequest,
     CurveRequest,
@@ -61,6 +63,24 @@ AEROBIC_DURABILITY_EXPLANATION = (
     "Aerobic durability tracks how much efficiency (power per heart-rate beat) "
     "remains in stable windows as accumulated work increases."
 )
+
+
+@st.cache_data(max_entries=32, show_spinner=False)
+def _cached_performance_durability(
+    data_dir: str,
+    activity_id: str,
+    durations_s: tuple[int, ...],
+    thresholds_kj: tuple[float, ...],
+) -> dict:
+    with Store(data_dir) as store:
+        result = CyclingService(store).durability(
+            DurabilityRequest(
+                activity_id=activity_id,
+                durations=list(durations_s),
+                thresholds_kj=list(thresholds_kj),
+            )
+        )
+        return result.model_dump(mode="json")
 
 
 def _format_power_curve_duration(duration_s: int) -> str:
@@ -266,7 +286,6 @@ def _period_filter(st, activities: list[dict], key: str):
 
 def run():
     import plotly.graph_objects as go
-    import streamlit as st
 
     args = argparse.ArgumentParser()
     args.add_argument("--data-dir", default=".cycling")
@@ -593,11 +612,18 @@ def run():
                     )
                 if durability_mode == "Performance durability":
                     st.caption(PERFORMANCE_DURABILITY_EXPLANATION)
-                    result = service.durability(DurabilityRequest(activity_id=ident))
+                    with st.spinner("Computing performance durability..."):
+                        request = DurabilityRequest(activity_id=ident)
+                        result_payload = _cached_performance_durability(
+                            settings.data_dir,
+                            ident,
+                            tuple(request.durations),
+                            tuple(request.thresholds_kj),
+                        )
                     st.warning(
                         "Observed efforts by prior work; not a controlled fatigue test. Missing-power MTB has no power durability."
                     )
-                    data = result.data
+                    data = result_payload["data"]
                     if not data.get("available", True):
                         st.warning(
                             f"Durability unavailable: {data.get('reason', 'Missing power data')}"
@@ -643,7 +669,7 @@ def run():
                             yaxis_title="Duration",
                         )
                         st.plotly_chart(fig_hm, width="stretch")
-                    st.json(result.model_dump(mode="json"))
+                    st.json(result_payload)
                 else:
                     st.caption(AEROBIC_DURABILITY_EXPLANATION)
                     result = service.aerobic_durability(
@@ -712,6 +738,4 @@ if __name__ == "__main__":
     try:
         run()
     except (ValueError, KeyError, OSError) as exc:
-        import streamlit as st
-
         st.error(str(exc))

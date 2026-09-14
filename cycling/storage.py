@@ -363,6 +363,30 @@ class Store:
             return []
         return pq.read_table(sample_file).to_pylist()
 
+    def delete_activity(self, ident: str) -> dict:
+        """Remove one catalog activity and its derived data."""
+        activity = self.activity(ident)
+        sample_path = activity.get("sample_path")
+        self.db.execute("DELETE FROM metrics WHERE activity_id=?", [ident])
+        self.db.execute("DELETE FROM intervals WHERE activity_id=?", [ident])
+        self.db.execute("DELETE FROM power_curve WHERE activity_id=?", [ident])
+        self.db.execute("DELETE FROM quality_flags WHERE activity_id=?", [ident])
+        self.db.execute("DELETE FROM activity_context WHERE activity_id=?", [ident])
+        self.db.execute("DELETE FROM activity_laps WHERE activity_id=?", [ident])
+        self.db.execute("DELETE FROM activities WHERE id=?", [ident])
+        if (
+            sample_path
+            and not self.db.execute(
+                "SELECT 1 FROM activities WHERE sample_path=? LIMIT 1", [sample_path]
+            ).fetchone()
+        ):
+            (self.root / sample_path).unlink(missing_ok=True)
+        return {
+            "activity_id": ident,
+            "source_name": activity.get("source_name"),
+            "deleted": True,
+        }
+
     def cached(self, ident: str, key: str):
         row = self.db.execute(
             "SELECT result FROM metrics WHERE activity_id=? AND cache_key=? "

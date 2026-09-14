@@ -75,6 +75,13 @@ class IngestionStorageTests(unittest.TestCase):
             self.assertEqual(res2["ingested"], 0)
             self.assertEqual(res2["skipped"], 1)
 
+            sample_path = store.activity(digest)["sample_path"]
+            deleted = store.delete_activity(digest)
+            self.assertEqual(deleted["activity_id"], digest)
+            with self.assertRaises(KeyError):
+                store.activity(digest)
+            self.assertFalse((store_root / sample_path).exists())
+
             store.close()
 
     def test_parameter_selection_historical_vs_current(self):
