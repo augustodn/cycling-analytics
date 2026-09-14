@@ -1,18 +1,40 @@
 """Streamlit adapter: visualization only, all metrics come from the service."""
 
 import argparse
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from cycling.models import (
     ActivityRequest,
     CurveRequest,
     DurabilityRequest,
     LoadRequest,
+    PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
     StreamRequest,
 )
 from cycling.service import CyclingService
 from cycling.storage import Store
+
+POWER_CURVE_TIME_EXPONENT = 0.2
+POWER_CURVE_TICKS = (
+    (1, "1s"),
+    (15, "15s"),
+    (60, "1m"),
+    (300, "5m"),
+    (600, "10m"),
+    (1200, "20m"),
+    (1800, "30m"),
+    (2700, "45m"),
+    (3600, "1h"),
+    (5400, "1.5h"),
+    (7200, "2h"),
+    (10800, "3h"),
+    (14400, "4h"),
+    (18000, "5h"),
+    (21600, "6h"),
+    (36000, "10h"),
+    (86400, "24h"),
+)
 
 LOAD_CURVE_EXPLANATION = (
     "CTL (fitness) is a 42-day exponentially weighted average of daily load; "
@@ -21,6 +43,144 @@ LOAD_CURVE_EXPLANATION = (
     "then HR, then session RPE. Global load combines all modalities before these "
     "daily calculations."
 )
+
+
+def _format_power_curve_duration(duration_s: int) -> str:
+    if duration_s < 60:
+        return f"{duration_s}s"
+    minutes, seconds = divmod(duration_s, 60)
+    if minutes < 60:
+        return f"{minutes}m" if seconds == 0 else f"{minutes}m {seconds}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h" if minutes == 0 else f"{hours}h {minutes}m"
+
+
+def _power_curve_position(duration_s: int) -> float:
+    if duration_s < 1:
+        raise ValueError("duration must be at least one second")
+    return duration_s**POWER_CURVE_TIME_EXPONENT
+
+
+def _power_curve_figure(
+    go,
+    watts: dict[str, float | None],
+    requested_durations: list[int] | None = None,
+):
+    points = sorted(
+        (int(duration), value) for duration, value in watts.items() if value is not None
+    )
+    if not points:
+        return None
+
+    max_duration = max(
+        requested_durations or [],
+        default=points[-1][0],
+    )
+    ticks = [
+        (duration, label)
+        for duration, label in POWER_CURVE_TICKS
+        if duration <= max_duration
+    ]
+    if not ticks or ticks[-1][0] != max_duration:
+        ticks.append((max_duration, _format_power_curve_duration(max_duration)))
+
+    return go.Figure(
+        go.Scatter(
+            x=[_power_curve_position(duration) for duration, _ in points],
+            y=[value for _, value in points],
+            customdata=[
+                [_format_power_curve_duration(duration)] for duration, _ in points
+            ],
+            hovertemplate=(
+                "Duration: %{customdata[0]}<br>Power: %{y:.0f} W<extra></extra>"
+            ),
+            mode="lines+markers",
+        )
+    ).update_layout(
+        xaxis={
+            "title": "Duration",
+            "type": "linear",
+            "range": [1, _power_curve_position(max_duration)],
+            "tickmode": "array",
+            "tickvals": [_power_curve_position(duration) for duration, _ in ticks],
+            "ticktext": [label for _, label in ticks],
+        },
+        yaxis_title="Best observed power (W)",
+    )
+
+
+def _render_hr_distribution(st, go, data: dict, no_data_message: str) -> None:
+    st.caption(
+        "Basis: percentage of known heart-rate time; missing or unclassified samples are unknown."
+    )
+    col1, col2 = st.columns(2)
+    col1.metric(
+        "Known HR time",
+        _format_power_curve_duration(data.get("total_seconds", 0)),
+    )
+    col2.metric(
+        "Unknown HR time",
+        _format_power_curve_duration(data.get("unknown_seconds", 0)),
+    )
+
+    seconds = data.get("seconds", [])
+    percentages = data.get("percentages", [])
+    zones = data.get("zones", [])
+    labels = [zone["label"] for zone in zones]
+
+    if not sum(seconds):
+        st.warning(no_data_message)
+        return
+
+    table_data = [
+        {
+            "Zone": zone["label"],
+            "Intensity": zone["percentage_range"],
+            "HR range": zone["hr_range"],
+            "Time": _format_power_curve_duration(seconds[index]),
+            "Percentage": f"{percentages[index]:.1f}%",
+        }
+        for index, zone in enumerate(zones)
+    ]
+    st.dataframe(table_data)
+
+    chart = go.Figure(
+        go.Bar(
+            x=labels,
+            y=percentages,
+            text=[f"{percentage:.1f}%" for percentage in percentages],
+            textposition="auto",
+        )
+    ).update_layout(
+        xaxis_title="HR zone",
+        yaxis_title="Known HR time (%)",
+        title="Heart rate zone distribution",
+    )
+    st.plotly_chart(chart, width="stretch")
+
+
+def _period_filter(st, activities: list[dict], key: str):
+    period = st.selectbox(
+        "Period",
+        ["30d", "90d", "365d", "all", "Custom range"],
+        key=f"{key}_period",
+    )
+    if period != "Custom range":
+        return period, None, None
+
+    activity_dates = [
+        date.fromisoformat(activity["start_time"][:10]) for activity in activities
+    ]
+    selected = st.date_input(
+        "Start and end dates",
+        value=(min(activity_dates), max(activity_dates)),
+        min_value=min(activity_dates),
+        max_value=max(activity_dates),
+        key=f"{key}_dates",
+    )
+    if isinstance(selected, (tuple, list)) and len(selected) == 2:
+        return "custom", selected[0], selected[1]
+    return "custom", None, None
 
 
 def run():
@@ -39,7 +199,15 @@ def run():
         service = CyclingService(store)
         page = st.sidebar.selectbox(
             "View",
-            ["Overview", "Activity", "Power curve", "Durability", "Load", "Calendar"],
+            [
+                "Overview",
+                "Activity",
+                "Power curve",
+                "Heart rate distribution",
+                "Durability",
+                "Load",
+                "Calendar",
+            ],
         )
         mode = st.sidebar.selectbox("Declared settings", ["historical", "current"])
 
@@ -175,7 +343,12 @@ def run():
         if page == "Power curve":
             curve_type = st.selectbox("Curve type", ["Single Activity", "Period"])
             if curve_type == "Period":
-                period = st.selectbox("Period", ["30d", "90d", "365d", "all"])
+                period, start_date, end_date = _period_filter(
+                    st, activities, "power_curve"
+                )
+                if period == "custom" and (start_date is None or end_date is None):
+                    st.warning("Select both a start date and an end date.")
+                    return
                 modality = st.selectbox(
                     "Modality",
                     ["all"]
@@ -183,24 +356,18 @@ def run():
                 )
                 try:
                     result = service.period_power_curve(
-                        PeriodPowerCurveRequest(period=period, modality=modality)
+                        PeriodPowerCurveRequest(
+                            period=period,
+                            modality=modality,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
                     )
                     watts = result.data.get("watts", {})
-                    durations = [int(d) for d in watts.keys() if watts[d] is not None]
-                    values = [watts[str(d)] for d in durations]
-                    if values:
-                        chart = go.Figure(
-                            go.Scatter(
-                                x=durations,
-                                y=values,
-                                mode="lines+markers",
-                            )
-                        )
-                        chart.update_layout(
-                            xaxis_title="Duration (seconds)",
-                            xaxis_type="log",
-                            yaxis_title="Best observed power (W)",
-                        )
+                    chart = _power_curve_figure(
+                        go, watts, result.data.get("durations_s")
+                    )
+                    if chart is not None:
                         st.plotly_chart(chart, width="stretch")
                     else:
                         st.warning(
@@ -209,6 +376,41 @@ def run():
                     st.json(result.model_dump(mode="json"))
                 except Exception as exc:
                     st.error(f"Error computing period power curve: {exc}")
+                return
+
+        if page == "Heart rate distribution":
+            dist_type = st.selectbox("Distribution type", ["Single Activity", "Period"])
+            if dist_type == "Period":
+                period, start_date, end_date = _period_filter(
+                    st, activities, "hr_distribution"
+                )
+                if period == "custom" and (start_date is None or end_date is None):
+                    st.warning("Select both a start date and an end date.")
+                    return
+                modality = st.selectbox(
+                    "Modality",
+                    ["all"]
+                    + sorted({a.get("modality", "unknown") for a in activities}),
+                )
+                try:
+                    result = service.period_hr_distribution(
+                        PeriodHRDistributionRequest(
+                            period=period,
+                            modality=modality,
+                            parameter_mode=mode,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
+                    )
+                    _render_hr_distribution(
+                        st,
+                        go,
+                        result.data,
+                        "No heart rate data found for the selected period/modality.",
+                    )
+                    st.json(result.model_dump(mode="json"))
+                except Exception as exc:
+                    st.error(f"Error computing period HR distribution: {exc}")
                 return
 
         chosen = st.selectbox(
@@ -267,27 +469,29 @@ def run():
             try:
                 result = service.power_curve(CurveRequest(activity_id=ident))
                 curve = result.data.get("watts", {})
-                durations = [int(d) for d in curve.keys() if curve[d] is not None]
-                values = [curve[str(d)] for d in durations]
-                if values:
-                    chart = go.Figure(
-                        go.Scatter(
-                            x=durations,
-                            y=values,
-                            mode="lines+markers",
-                        )
-                    )
-                    chart.update_layout(
-                        xaxis_title="Duration (seconds)",
-                        xaxis_type="log",
-                        yaxis_title="Best observed power (W)",
-                    )
+                chart = _power_curve_figure(go, curve, result.data.get("durations_s"))
+                if chart is not None:
                     st.plotly_chart(chart, width="stretch")
                 else:
                     st.warning("No power data available for this activity.")
                 st.json(result.model_dump(mode="json"))
             except Exception as exc:
                 st.error(f"Power curve unavailable: {exc}")
+
+        elif page == "Heart rate distribution":
+            try:
+                result = service.hr_distribution(
+                    ActivityRequest(activity_id=ident, parameter_mode=mode)
+                )
+                _render_hr_distribution(
+                    st,
+                    go,
+                    result.data,
+                    "No heart rate data available for this activity.",
+                )
+                st.json(result.model_dump(mode="json"))
+            except Exception as exc:
+                st.error(f"Heart rate distribution unavailable: {exc}")
 
         elif page == "Durability":
             try:

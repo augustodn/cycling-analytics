@@ -22,6 +22,7 @@ from cycling.models import (
     CurveRequest,
     DurabilityRequest,
     LoadRequest,
+    PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
     StreamRequest,
 )
@@ -298,6 +299,18 @@ class ServiceTests(unittest.TestCase):
                 LoadRequest,
                 {"start": "2026-02-01", "end": "2026-01-01", "modality": "road"},
             ),
+            (
+                PeriodPowerCurveRequest,
+                {"period": "custom", "start_date": "2026-01-01"},
+            ),
+            (
+                PeriodHRDistributionRequest,
+                {
+                    "period": "custom",
+                    "start_date": "2026-01-02",
+                    "end_date": "2026-01-01",
+                },
+            ),
         ):
             with self.assertRaises(ValidationError):
                 model.model_validate(data)
@@ -378,6 +391,38 @@ class ServiceTests(unittest.TestCase):
         self.assertIsNone(res_mtb.data["watts"]["5"])
         self.assertIsNone(res_mtb.data["records"]["5"])
 
+    def test_custom_period_filter_is_inclusive(self):
+        ident = self.ingest()
+        start = date(2026, 1, 1)
+
+        power_res = self.service.period_power_curve(
+            PeriodPowerCurveRequest(
+                period="custom",
+                start_date=start,
+                end_date=start,
+            )
+        )
+        self.assertEqual(power_res.data["activities_evaluated"], 1)
+        self.assertEqual(power_res.data["records"]["5"]["activity_id"], ident)
+
+        hr_res = self.service.period_hr_distribution(
+            PeriodHRDistributionRequest(
+                period="custom",
+                start_date=start,
+                end_date=start,
+            )
+        )
+        self.assertEqual(hr_res.data["activity_count"], 1)
+
+        outside_res = self.service.period_power_curve(
+            PeriodPowerCurveRequest(
+                period="custom",
+                start_date=date(2026, 1, 2),
+                end_date=date(2026, 1, 3),
+            )
+        )
+        self.assertEqual(outside_res.data["activities_evaluated"], 0)
+
     def test_semantic_service_aliases(self):
         ident = self.ingest()
         req_act = ActivityRequest(activity_id=ident)
@@ -424,6 +469,41 @@ class ServiceTests(unittest.TestCase):
         pc_res = cli("power-curves", "--period", "30d", "--modality", "all")
         self.assertEqual(pc_res["operation"], "period_power_curve")
 
+    def test_power_curve_extended_durations_and_null_behavior(self):
+        ident = self.ingest()
+        res = self.service.power_curve(CurveRequest(activity_id=ident))
+        watts = res.data["watts"]
+        # Standard durations up to 21600 (6h) are present
+        self.assertIn("1800", watts)
+        self.assertIn("3600", watts)
+        self.assertIn("21600", watts)
+        # Synthetic activity is short (under 1h), so 6h window max power is None
+        self.assertIsNone(watts["21600"])
+
+        period_res = self.service.period_power_curve(
+            PeriodPowerCurveRequest(period="all", modality="all")
+        )
+        period_watts = period_res.data["watts"]
+        self.assertIn("21600", period_watts)
+        self.assertIsNone(period_watts["21600"])
+
+    def test_hr_distribution_single_and_period(self):
+        ident = self.ingest()
+        res = self.service.hr_distribution(ActivityRequest(activity_id=ident))
+        self.assertEqual(res.operation, "hr_distribution")
+        self.assertEqual(res.data["basis"], "hr")
+        self.assertEqual(len(res.data["seconds"]), 7)
+        self.assertEqual(len(res.data["percentages"]), 7)
+        self.assertEqual(len(res.data["zones"]), 7)
+        self.assertEqual(res.data["zones"][0]["label"], "1 Recovery")
+
+        period_res = self.service.period_hr_distribution(
+            PeriodHRDistributionRequest(period="all", modality="all")
+        )
+        self.assertEqual(period_res.operation, "period_hr_distribution")
+        self.assertEqual(period_res.data["basis"], "hr")
+        self.assertEqual(len(period_res.data["seconds"]), 7)
+
     def test_cli_compatibility_extensions(self):
         directory = str(self.root / "cli-ext-data")
 
@@ -455,6 +535,18 @@ class ServiceTests(unittest.TestCase):
         code, res = cli("power-curve", "--period", "90d", "--end-date", "2026-06-01")
         self.assertEqual(code, 0)
         self.assertEqual(res["operation"], "period_power_curve")
+
+        code, res = cli(
+            "power-curves",
+            "--period",
+            "custom",
+            "--start-date",
+            "2026-01-01",
+            "--end-date",
+            "2026-01-01",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(res["data"]["activities_evaluated"], 1)
 
         # activities list filtering
         code, res = cli("activities", "list", "--limit", "1", "--modality", "all")

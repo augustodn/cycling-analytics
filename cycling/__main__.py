@@ -70,14 +70,47 @@ def parser():
     pc.add_argument(
         "--parameter-mode", choices=["historical", "current"], default="historical"
     )
-    pc.add_argument("--durations", nargs="+", type=int, default=[5, 30, 60, 300, 1200])
-    pc.add_argument("--period", choices=["30d", "90d", "365d", "all"], default="all")
+    pc.add_argument(
+        "--durations",
+        nargs="+",
+        type=int,
+        default=[
+            5,
+            30,
+            60,
+            300,
+            600,
+            900,
+            1200,
+            1800,
+            2700,
+            3600,
+            4500,
+            5400,
+            6300,
+            7200,
+            9000,
+            10800,
+            12600,
+            14400,
+            16200,
+            18000,
+            19800,
+            21600,
+        ],
+    )
+    pc.add_argument(
+        "--period", choices=["30d", "90d", "365d", "all", "custom"], default="all"
+    )
     pc.add_argument(
         "--modality",
         choices=["indoor", "road", "mtb", "gravel", "unknown", "all"],
         default="all",
     )
-    pc.add_argument("--end-date", help="Optional reference end date (YYYY-MM-DD)")
+    pc.add_argument("--start-date", help="Custom range start date (YYYY-MM-DD)")
+    pc.add_argument(
+        "--end-date", help="Reference or custom range end date (YYYY-MM-DD)"
+    )
     for command in ("durability", "drift", "thresholds", "stream"):
         sub = commands.add_parser(command)
         sub.add_argument("activity_id")
@@ -86,7 +119,33 @@ def parser():
         )
         if command == "durability":
             sub.add_argument(
-                "--durations", nargs="+", type=int, default=[5, 30, 60, 300, 1200]
+                "--durations",
+                nargs="+",
+                type=int,
+                default=[
+                    5,
+                    30,
+                    60,
+                    300,
+                    600,
+                    900,
+                    1200,
+                    1800,
+                    2700,
+                    3600,
+                    4500,
+                    5400,
+                    6300,
+                    7200,
+                    9000,
+                    10800,
+                    12600,
+                    14400,
+                    16200,
+                    18000,
+                    19800,
+                    21600,
+                ],
             )
             sub.add_argument(
                 "--bucket-kj", nargs="+", type=float, default=[0, 500, 1000, 1500]
@@ -97,7 +156,7 @@ def parser():
             sub.add_argument("--max-points", type=int, default=2000)
     power_curves = commands.add_parser("power-curves")
     power_curves.add_argument(
-        "--period", choices=["30d", "90d", "365d", "all"], default="all"
+        "--period", choices=["30d", "90d", "365d", "all", "custom"], default="all"
     )
     power_curves.add_argument(
         "--modality",
@@ -105,7 +164,36 @@ def parser():
         default="all",
     )
     power_curves.add_argument(
-        "--durations", nargs="+", type=int, default=[5, 30, 60, 300, 1200]
+        "--durations",
+        nargs="+",
+        type=int,
+        default=[
+            5,
+            30,
+            60,
+            300,
+            600,
+            900,
+            1200,
+            1800,
+            2700,
+            3600,
+            4500,
+            5400,
+            6300,
+            7200,
+            9000,
+            10800,
+            12600,
+            14400,
+            16200,
+            18000,
+            19800,
+            21600,
+        ],
+    )
+    power_curves.add_argument(
+        "--start-date", help="Custom range start date (YYYY-MM-DD)"
     )
     power_curves.add_argument(
         "--end-date", help="Optional reference end date (YYYY-MM-DD)"
@@ -225,10 +313,15 @@ def main(argv=None):
                 if args.activity_id:
                     if any(
                         opt in raw_args
-                        for opt in ("--period", "--modality", "--end-date")
+                        for opt in (
+                            "--period",
+                            "--modality",
+                            "--start-date",
+                            "--end-date",
+                        )
                     ):
                         raise ValueError(
-                            "Ambiguous invocation: activity_id cannot be combined with period options (--period, --modality, --end-date)"
+                            "Ambiguous invocation: activity_id cannot be combined with period options (--period, --modality, --start-date, --end-date)"
                         )
                     result = service.power_curve(
                         CurveRequest(
@@ -238,6 +331,9 @@ def main(argv=None):
                         )
                     )
                 else:
+                    start_dt = None
+                    if args.start_date:
+                        start_dt = date.fromisoformat(args.start_date)
                     end_dt = None
                     if args.end_date:
                         end_dt = date.fromisoformat(args.end_date)
@@ -246,10 +342,14 @@ def main(argv=None):
                             period=args.period,
                             modality=args.modality,
                             durations=args.durations,
+                            start_date=start_dt,
                             end_date=end_dt,
                         )
                     )
             elif command == "power-curves":
+                start_dt = None
+                if args.start_date:
+                    start_dt = date.fromisoformat(args.start_date)
                 end_dt = None
                 if args.end_date:
                     end_dt = date.fromisoformat(args.end_date)
@@ -258,6 +358,7 @@ def main(argv=None):
                         period=args.period,
                         modality=args.modality,
                         durations=args.durations,
+                        start_date=start_dt,
                         end_date=end_dt,
                     )
                 )

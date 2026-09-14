@@ -32,6 +32,64 @@ from cycling.analytics.types import (
     ZonesResult,
 )
 
+HR_ZONE_DEFINITIONS = (
+    ("1 Recovery", "0–81%", "0–126 bpm", 0, 126),
+    ("2 Aerobic", "82–89%", "127–139 bpm", 127, 139),
+    ("3 Tempo", "90–93%", "140–145 bpm", 140, 145),
+    ("4 SubThreshold", "94–99%", "146–154 bpm", 146, 154),
+    ("5a Threshold", "100–102%", "155–159 bpm", 155, 159),
+    ("5b Aerobic Capacity", "103–106%", "160–165 bpm", 160, 165),
+    ("5c Anaerobic", "107%+", "166 bpm+", 166, None),
+)
+
+
+def calculate_hr_zone_distribution(
+    samples: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Calculate time spent in the configured seven heart-rate zones."""
+    seconds = [0] * len(HR_ZONE_DEFINITIONS)
+    unknown_seconds = 0
+
+    for sample in filter_active(samples):
+        value = sample.get("hr_bpm")
+        if not _is_valid_value(value):
+            unknown_seconds += 1
+            continue
+
+        hr_bpm = float(value)
+        zone_index = next(
+            (
+                index
+                for index, (_, _, _, lower, upper) in enumerate(HR_ZONE_DEFINITIONS)
+                if hr_bpm >= lower and (upper is None or hr_bpm <= upper)
+            ),
+            None,
+        )
+        if zone_index is None:
+            unknown_seconds += 1
+        else:
+            seconds[zone_index] += 1
+
+    total_seconds = sum(seconds)
+    percentages = [
+        (100.0 * value / total_seconds) if total_seconds else 0.0 for value in seconds
+    ]
+    return {
+        "basis": "hr",
+        "seconds": seconds,
+        "percentages": percentages,
+        "total_seconds": total_seconds,
+        "unknown_seconds": unknown_seconds,
+        "zones": [
+            {
+                "label": label,
+                "percentage_range": percentage_range,
+                "hr_range": hr_range,
+            }
+            for label, percentage_range, hr_range, _, _ in HR_ZONE_DEFINITIONS
+        ],
+    }
+
 
 def calculate_zone_seconds(
     samples: Sequence[Dict[str, Any]], parameters: Optional[Any]

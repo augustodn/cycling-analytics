@@ -45,7 +45,34 @@ def durability(
     bucket_kj: Optional[Sequence[float]] = None,
 ) -> Dict[str, Any]:
     """Calculate durability decay of Mean Maximal Power across prior work buckets."""
-    dur_seq = (5, 30, 60, 300, 1200) if durations is None else tuple(durations)
+    dur_seq = (
+        (
+            5,
+            30,
+            60,
+            300,
+            600,
+            900,
+            1200,
+            1800,
+            2700,
+            3600,
+            4500,
+            5400,
+            6300,
+            7200,
+            9000,
+            10800,
+            12600,
+            14400,
+            16200,
+            18000,
+            19800,
+            21600,
+        )
+        if durations is None
+        else tuple(durations)
+    )
     bkt_seq = (0, 500, 1000, 1500) if bucket_kj is None else tuple(bucket_kj)
 
     _validate_durations(dur_seq)

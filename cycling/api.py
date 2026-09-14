@@ -13,6 +13,7 @@ from cycling.models import (
     CurveRequest,
     DurabilityRequest,
     LoadRequest,
+    PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
     SetContextRequest,
     StreamRequest,
@@ -79,6 +80,14 @@ def create_app(data_dir=".cycling"):
     @app.post("/power-curves", response_model=ToolResult)
     async def period_power_curves(request: PeriodPowerCurveRequest):
         return app.state.service.period_power_curve(request)
+
+    @app.post("/hr-distribution", response_model=ToolResult)
+    async def hr_distribution(request: ActivityRequest):
+        return app.state.service.hr_distribution(request)
+
+    @app.post("/period-hr-distributions", response_model=ToolResult)
+    async def period_hr_distributions(request: PeriodHRDistributionRequest):
+        return app.state.service.period_hr_distribution(request)
 
     @app.post("/durability", response_model=ToolResult)
     async def durability(request: DurabilityRequest):

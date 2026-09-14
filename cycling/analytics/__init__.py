@@ -47,7 +47,10 @@ from cycling.analytics.types import (
     ZoneDistribution,
     ZonesResult,
 )
-from cycling.analytics.zones import calculate_zone_seconds
+from cycling.analytics.zones import (
+    calculate_hr_zone_distribution,
+    calculate_zone_seconds,
+)
 
 __all__ = [
     # Main Pipeline & Legacy API
@@ -61,6 +64,7 @@ __all__ = [
     # Specific Functions
     "calculate_session_load",
     "calculate_zone_seconds",
+    "calculate_hr_zone_distribution",
     "summarize_power",
     "summarize_hr",
     "summarize_cadence",

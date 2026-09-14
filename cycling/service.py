@@ -1,10 +1,11 @@
 """Semantic tools shared by CLI, HTTP and dashboard adapters."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from math import ceil
 from typing import Any
 
 from cycling import ALGORITHM_VERSION, analytics
+from cycling.analytics.zones import HR_ZONE_DEFINITIONS
 from cycling.models import (
     ActivityContext,
     ActivityRequest,
@@ -13,11 +14,52 @@ from cycling.models import (
     CurveRequest,
     DurabilityRequest,
     LoadRequest,
+    PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
     StreamRequest,
     ToolResult,
 )
 from cycling.storage import Store, encode, now
+
+
+def _filter_period_activities(
+    activities: list[dict[str, Any]],
+    modality: str,
+    period: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[dict[str, Any]]:
+    selected = [
+        activity
+        for activity in activities
+        if modality == "all" or activity.get("modality", "unknown") == modality
+    ]
+    if not selected:
+        return []
+
+    activity_dates = {
+        activity["id"]: date.fromisoformat(activity["start_time"][:10])
+        for activity in selected
+    }
+    if period == "custom":
+        if start_date is None or end_date is None:
+            raise ValueError("custom period requires start_date and end_date")
+        return [
+            activity
+            for activity in selected
+            if start_date <= activity_dates[activity["id"]] <= end_date
+        ]
+
+    if period == "all":
+        return selected
+
+    ref_date = end_date or max(activity_dates.values())
+    cutoff = ref_date - timedelta(days={"30d": 30, "90d": 90, "365d": 365}[period])
+    return [
+        activity
+        for activity in selected
+        if cutoff <= activity_dates[activity["id"]] <= ref_date
+    ]
 
 
 class CyclingService:
@@ -136,32 +178,13 @@ class CyclingService:
         )
 
     def period_power_curve(self, request: PeriodPowerCurveRequest):
-        from datetime import timedelta
-
-        activities = self.store.activities()
-        if request.modality != "all":
-            activities = [
-                a
-                for a in activities
-                if a.get("modality", "unknown") == request.modality
-            ]
-        if activities and request.period != "all":
-            ref_date = (
-                request.end_date
-                if request.end_date is not None
-                else max(date.fromisoformat(a["start_time"][:10]) for a in activities)
-            )
-            days_map = {"30d": 30, "90d": 90, "365d": 365}
-            cutoff = ref_date - timedelta(days=days_map[request.period])
-            activities = [
-                a
-                for a in activities
-                if date.fromisoformat(a["start_time"][:10]) >= cutoff
-                and (
-                    request.end_date is None
-                    or date.fromisoformat(a["start_time"][:10]) <= request.end_date
-                )
-            ]
+        activities = _filter_period_activities(
+            self.store.activities(),
+            request.modality,
+            request.period,
+            request.start_date,
+            request.end_date,
+        )
 
         best_watts: dict[int, float | None] = {d: None for d in request.durations}
         best_records: dict[int, dict[str, Any] | None] = {
@@ -222,6 +245,77 @@ class CyclingService:
             ),
             ident,
             request.parameter_mode,
+        )
+
+    def hr_distribution(self, request: ActivityRequest):
+        _, ident, _ = self.settings(request)
+        distribution = analytics.calculate_hr_zone_distribution(
+            self.store.samples(request.activity_id)
+        )
+        return self.result(
+            "hr_distribution",
+            {
+                "activity_id": request.activity_id,
+                **distribution,
+            },
+            parameter_id=ident,
+            parameter_mode=request.parameter_mode,
+        )
+
+    def period_hr_distribution(self, request: PeriodHRDistributionRequest):
+        activities = _filter_period_activities(
+            self.store.activities(),
+            request.modality,
+            request.period,
+            request.start_date,
+            request.end_date,
+        )
+
+        num_zones = len(HR_ZONE_DEFINITIONS)
+        accumulated_seconds = [0] * num_zones
+        total_unknown = 0
+        matching_activities = []
+
+        for activity in activities:
+            distribution = analytics.calculate_hr_zone_distribution(
+                self.store.samples(activity["id"])
+            )
+            accumulated_seconds = [
+                a + b
+                for a, b in zip(
+                    accumulated_seconds, distribution["seconds"], strict=True
+                )
+            ]
+            total_unknown += distribution["unknown_seconds"]
+            matching_activities.append(activity["id"])
+
+        total_seconds = sum(accumulated_seconds)
+        percentages = [
+            (100.0 * s / total_seconds) if total_seconds > 0 else 0.0
+            for s in accumulated_seconds
+        ]
+        return self.result(
+            "period_hr_distribution",
+            {
+                "period": request.period,
+                "modality": request.modality,
+                "activity_count": len(matching_activities),
+                "basis": "hr",
+                "seconds": accumulated_seconds,
+                "percentages": percentages,
+                "total_seconds": total_seconds,
+                "unknown_seconds": total_unknown,
+                "zones": [
+                    {
+                        "label": label,
+                        "percentage_range": percentage_range,
+                        "hr_range": hr_range,
+                    }
+                    for label, percentage_range, hr_range, _, _ in HR_ZONE_DEFINITIONS
+                ],
+                "activity_ids": matching_activities,
+            },
+            parameter_mode=request.parameter_mode,
         )
 
     def thresholds(self, request: ActivityRequest):

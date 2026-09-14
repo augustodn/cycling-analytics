@@ -93,7 +93,32 @@ class SetContextRequest(Contract):
 
 class CurveRequest(ActivityRequest):
     durations: list[int] = Field(
-        default=[5, 30, 60, 300, 1200], min_length=1, max_length=30
+        default=[
+            5,
+            30,
+            60,
+            300,
+            600,
+            900,
+            1200,
+            1800,
+            2700,
+            3600,
+            4500,
+            5400,
+            6300,
+            7200,
+            9000,
+            10800,
+            12600,
+            14400,
+            16200,
+            18000,
+            19800,
+            21600,
+        ],
+        min_length=1,
+        max_length=30,
     )
 
     @model_validator(mode="after")
@@ -104,17 +129,75 @@ class CurveRequest(ActivityRequest):
 
 
 class PeriodPowerCurveRequest(Contract):
-    period: Literal["30d", "90d", "365d", "all"] = "all"
+    period: Literal["30d", "90d", "365d", "all", "custom"] = "all"
     modality: Literal["indoor", "road", "mtb", "gravel", "unknown", "all"] = "all"
     durations: list[int] = Field(
-        default=[5, 30, 60, 300, 1200], min_length=1, max_length=30
+        default=[
+            5,
+            30,
+            60,
+            300,
+            600,
+            900,
+            1200,
+            1800,
+            2700,
+            3600,
+            4500,
+            5400,
+            6300,
+            7200,
+            9000,
+            10800,
+            12600,
+            14400,
+            16200,
+            18000,
+            19800,
+            21600,
+        ],
+        min_length=1,
+        max_length=30,
     )
+    start_date: date | None = None
     end_date: date | None = None
 
     @model_validator(mode="after")
     def positive_durations(self):
         if any(d < 1 or d > 86400 for d in self.durations):
             raise ValueError("durations must be between 1 and 86400 seconds")
+        if self.period == "custom" and (
+            self.start_date is None or self.end_date is None
+        ):
+            raise ValueError("custom period requires start_date and end_date")
+        if (
+            self.start_date is not None
+            and self.end_date is not None
+            and self.end_date < self.start_date
+        ):
+            raise ValueError("end_date must not precede start_date")
+        return self
+
+
+class PeriodHRDistributionRequest(Contract):
+    period: Literal["30d", "90d", "365d", "all", "custom"] = "all"
+    modality: Literal["indoor", "road", "mtb", "gravel", "unknown", "all"] = "all"
+    parameter_mode: Literal["historical", "current"] = "historical"
+    start_date: date | None = None
+    end_date: date | None = None
+
+    @model_validator(mode="after")
+    def ordered_dates(self):
+        if self.period == "custom" and (
+            self.start_date is None or self.end_date is None
+        ):
+            raise ValueError("custom period requires start_date and end_date")
+        if (
+            self.start_date is not None
+            and self.end_date is not None
+            and self.end_date < self.start_date
+        ):
+            raise ValueError("end_date must not precede start_date")
         return self
 
 
