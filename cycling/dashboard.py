@@ -36,12 +36,30 @@ POWER_CURVE_TICKS = (
     (86400, "24h"),
 )
 
+DURABILITY_STATE_LABELS = (
+    (1000.0, "Fresh"),
+    (1500.0, "Early endurance"),
+    (1800.0, "Meaningful fatigue"),
+    (2100.0, "Late-race"),
+    (float("inf"), "Deep fatigue"),
+)
+
 LOAD_CURVE_EXPLANATION = (
     "CTL (fitness) is a 42-day exponentially weighted average of daily load; "
     "ATL (fatigue) is the same calculation over 7 days; TSB (form) is yesterday's "
     "CTL minus ATL. Each day's load uses power first (when coverage is sufficient), "
     "then HR, then session RPE. Global load combines all modalities before these "
     "daily calculations."
+)
+
+PERFORMANCE_DURABILITY_EXPLANATION = (
+    "Performance durability estimates how much observed power remains available "
+    "after accumulating significant prior work. It depends on the athlete "
+    "actually producing hard efforts late in the ride."
+)
+AEROBIC_DURABILITY_EXPLANATION = (
+    "Aerobic durability tracks how much efficiency (power per heart-rate beat) "
+    "remains in stable windows as accumulated work increases."
 )
 
 
@@ -107,6 +125,69 @@ def _power_curve_figure(
         },
         yaxis_title="Best observed power (W)",
     )
+
+
+def _durability_state_label(threshold_kj: float) -> str:
+    for upper_bound, label in DURABILITY_STATE_LABELS:
+        if threshold_kj < upper_bound:
+            return label
+    return "Deep fatigue"
+
+
+def _durability_plot_payload(data: dict) -> dict:
+    thresholds = [float(value) for value in data.get("thresholds_kj", [])]
+    durations = [int(value) for value in data.get("durations_s", [])]
+    points = {
+        (float(point["threshold_kj"]), int(point["duration_s"])): point
+        for point in data.get("points", [])
+    }
+    x_labels = ["Fresh"] + [
+        f"{_durability_state_label(threshold)}\n{threshold:g} kJ"
+        for threshold in thresholds
+    ]
+    retention = {}
+    heatmap_values = []
+    heatmap_text = []
+    for duration in durations:
+        values = [100.0]
+        for threshold in thresholds:
+            point = points.get((threshold, duration))
+            values.append(point.get("retention_pct") if point else None)
+        retention[duration] = values
+        heatmap_values.append(values)
+        heatmap_text.append(
+            ["100%"]
+            + [f"{value:.1f}%" if value is not None else "N/A" for value in values[1:]]
+        )
+    return {
+        "durations_s": durations,
+        "x_labels": x_labels,
+        "retention": retention,
+        "heatmap_values": heatmap_values,
+        "heatmap_text": heatmap_text,
+    }
+
+
+def _aerobic_durability_plot_payload(data: dict) -> dict:
+    thresholds = [float(value) for value in data.get("thresholds_kj", [])]
+    points = {float(point["threshold_kj"]): point for point in data.get("points", [])}
+    labels = ["Fresh"] + [
+        f"{_durability_state_label(threshold)}\n{threshold:g} kJ"
+        for threshold in thresholds
+    ]
+    baseline_ef = data.get("baseline", {}).get("efficiency_factor")
+    retention = [100.0]
+    efficiency = [baseline_ef]
+    for threshold in thresholds:
+        point = points.get(threshold, {})
+        retention.append(point.get("retention_pct"))
+        efficiency.append(point.get("efficiency_factor"))
+    return {
+        "labels": labels,
+        "retention": retention,
+        "efficiency": efficiency,
+        "thresholds_kj": thresholds,
+    }
 
 
 def _render_hr_distribution(st, go, data: dict, no_data_message: str) -> None:
@@ -495,15 +576,134 @@ def run():
 
         elif page == "Durability":
             try:
-                result = service.durability(DurabilityRequest(activity_id=ident))
-                st.warning(
-                    "Observed efforts by prior work; not a controlled fatigue test. Missing-power MTB has no power durability."
-                )
-                if not result.data.get("available", True):
-                    st.warning(
-                        f"Durability unavailable: {result.data.get('reason', 'Missing power data')}"
+                mode_options = ["Performance durability", "Aerobic durability"]
+                if hasattr(st, "segmented_control"):
+                    durability_mode = st.segmented_control(
+                        "Durability mode",
+                        mode_options,
+                        default=mode_options[0],
+                        key="durability_mode",
                     )
-                st.json(result.model_dump(mode="json"))
+                else:
+                    durability_mode = st.radio(
+                        "Durability mode",
+                        mode_options,
+                        horizontal=True,
+                        key="durability_mode",
+                    )
+                if durability_mode == "Performance durability":
+                    st.caption(PERFORMANCE_DURABILITY_EXPLANATION)
+                    result = service.durability(DurabilityRequest(activity_id=ident))
+                    st.warning(
+                        "Observed efforts by prior work; not a controlled fatigue test. Missing-power MTB has no power durability."
+                    )
+                    data = result.data
+                    if not data.get("available", True):
+                        st.warning(
+                            f"Durability unavailable: {data.get('reason', 'Missing power data')}"
+                        )
+                    else:
+                        plot = _durability_plot_payload(data)
+                        durations = plot["durations_s"]
+
+                        fig_ret = go.Figure()
+                        for d in durations:
+                            fig_ret.add_trace(
+                                go.Scatter(
+                                    x=plot["x_labels"],
+                                    y=plot["retention"][d],
+                                    mode="lines+markers",
+                                    name=_format_power_curve_duration(d),
+                                    connectgaps=False,
+                                )
+                            )
+                        fig_ret.update_layout(
+                            title="Power Retention vs Accumulated Work",
+                            xaxis_title="Accumulated Work",
+                            yaxis_title="Power Retention (%)",
+                            yaxis=dict(range=[0, 110]),
+                        )
+                        st.plotly_chart(fig_ret, width="stretch")
+
+                        fig_hm = go.Figure(
+                            data=go.Heatmap(
+                                z=plot["heatmap_values"],
+                                x=plot["x_labels"],
+                                y=[_format_power_curve_duration(d) for d in durations],
+                                text=plot["heatmap_text"],
+                                texttemplate="%{text}",
+                                textfont={"size": 12},
+                                colorscale="Viridis",
+                                showscale=True,
+                            )
+                        )
+                        fig_hm.update_layout(
+                            title="Power Retention Heatmap",
+                            xaxis_title="Work Threshold",
+                            yaxis_title="Duration",
+                        )
+                        st.plotly_chart(fig_hm, width="stretch")
+                    st.json(result.model_dump(mode="json"))
+                else:
+                    st.caption(AEROBIC_DURABILITY_EXPLANATION)
+                    result = service.aerobic_durability(
+                        ActivityRequest(activity_id=ident, parameter_mode=mode)
+                    )
+                    data = result.data
+                    if not data.get("available", False):
+                        st.warning(
+                            data.get(
+                                "reason",
+                                "Aerobic durability requires sufficient power and heart-rate data.",
+                            )
+                        )
+                    else:
+                        plot = _aerobic_durability_plot_payload(data)
+                        if not any(
+                            value is not None for value in plot["retention"][1:]
+                        ):
+                            st.info(
+                                "No complete aerobic durability window remains after the selected work thresholds."
+                            )
+                        else:
+                            fig_ret = go.Figure(
+                                go.Scatter(
+                                    x=plot["labels"],
+                                    y=plot["retention"],
+                                    mode="lines+markers",
+                                    name="EF retention",
+                                    connectgaps=False,
+                                )
+                            )
+                            fig_ret.add_hline(
+                                y=100,
+                                line_dash="dash",
+                                annotation_text="Fresh = 100%",
+                            )
+                            fig_ret.update_layout(
+                                title="Aerobic Efficiency Retention vs Accumulated Work",
+                                xaxis_title="Accumulated Work",
+                                yaxis_title="EF retention (%)",
+                                yaxis=dict(range=[0, 110]),
+                            )
+                            st.plotly_chart(fig_ret, width="stretch")
+
+                            fig_ef = go.Figure(
+                                go.Scatter(
+                                    x=plot["labels"],
+                                    y=plot["efficiency"],
+                                    mode="lines+markers",
+                                    name="Efficiency factor",
+                                    connectgaps=False,
+                                )
+                            )
+                            fig_ef.update_layout(
+                                title="Efficiency Factor vs Accumulated Work",
+                                xaxis_title="Accumulated Work",
+                                yaxis_title="Efficiency factor (W/bpm)",
+                            )
+                            st.plotly_chart(fig_ef, width="stretch")
+                    st.json(result.model_dump(mode="json"))
             except Exception as exc:
                 st.error(f"Durability unavailable: {exc}")
 

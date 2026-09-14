@@ -122,34 +122,15 @@ def parser():
                 "--durations",
                 nargs="+",
                 type=int,
-                default=[
-                    5,
-                    30,
-                    60,
-                    300,
-                    600,
-                    900,
-                    1200,
-                    1800,
-                    2700,
-                    3600,
-                    4500,
-                    5400,
-                    6300,
-                    7200,
-                    9000,
-                    10800,
-                    12600,
-                    14400,
-                    16200,
-                    18000,
-                    19800,
-                    21600,
-                ],
+                default=[300, 1200, 1800, 3600],
             )
             sub.add_argument(
-                "--bucket-kj", nargs="+", type=float, default=[0, 500, 1000, 1500]
+                "--thresholds-kj",
+                nargs="+",
+                type=float,
+                default=[1000.0, 1500.0, 1800.0, 2100.0, 2200.0],
             )
+            sub.add_argument("--bucket-kj", nargs="+", type=float, default=None)
         if command == "stream":
             sub.add_argument("--start-s", type=int, default=0)
             sub.add_argument("--end-s", type=int)
@@ -363,7 +344,8 @@ def main(argv=None):
                     )
                 )
             elif command == "durability":
-                result = service.durability(DurabilityRequest(**values))
+                clean_values = {k: v for k, v in values.items() if v is not None}
+                result = service.durability(DurabilityRequest(**clean_values))
             elif command in {"drift", "thresholds"}:
                 result = getattr(service, command)(ActivityRequest(**values))
             elif command == "stream":

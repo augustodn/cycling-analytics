@@ -9,13 +9,61 @@ from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
-from cycling.dashboard import _power_curve_figure, _power_curve_position
+from cycling.dashboard import (
+    _aerobic_durability_plot_payload,
+    _durability_plot_payload,
+    _power_curve_figure,
+    _power_curve_position,
+)
 from cycling.ingestion import ingest
 from cycling.storage import Store
 from tests.test_parsers import tcx_text
 
 
 class DashboardTests(unittest.TestCase):
+    def test_aerobic_durability_payload_contains_retention_and_efficiency(self):
+        payload = _aerobic_durability_plot_payload(
+            {
+                "thresholds_kj": [1000, 1500],
+                "baseline": {"efficiency_factor": 1.6},
+                "points": [
+                    {
+                        "threshold_kj": 1000,
+                        "retention_pct": 98.0,
+                        "efficiency_factor": 1.568,
+                    },
+                    {
+                        "threshold_kj": 1500,
+                        "retention_pct": None,
+                        "efficiency_factor": None,
+                    },
+                ],
+            }
+        )
+        self.assertEqual(payload["labels"][0], "Fresh")
+        self.assertEqual(payload["retention"], [100.0, 98.0, None])
+        self.assertEqual(payload["efficiency"], [1.6, 1.568, None])
+
+    def test_durability_payload_keeps_fresh_and_kj_labels(self):
+        payload = _durability_plot_payload(
+            {
+                "thresholds_kj": [1000, 1500, 1800, 2100, 2200],
+                "durations_s": [300],
+                "points": [
+                    {
+                        "threshold_kj": 1500,
+                        "duration_s": 300,
+                        "retention_pct": 90.0,
+                    }
+                ],
+            }
+        )
+        self.assertEqual(payload["x_labels"][0], "Fresh")
+        self.assertIn("1000 kJ", payload["x_labels"][1])
+        self.assertEqual(payload["heatmap_text"][0][0], "100%")
+        self.assertEqual(payload["heatmap_text"][0][1], "N/A")
+        self.assertEqual(payload["heatmap_text"][0][2], "90.0%")
+
     def test_power_curve_uses_strava_style_pseudo_log_axis(self):
         import plotly.graph_objects as go
 
@@ -120,6 +168,9 @@ class DashboardTests(unittest.TestCase):
                 # Durability
                 app.sidebar.selectbox[0].set_value("Durability").run()
                 self.assertEqual(len(app.exception), 0)
+                if len(app.segmented_control) > 0:
+                    app.segmented_control[0].set_value("Aerobic durability").run()
+                    self.assertEqual(len(app.exception), 0)
 
                 # Load
                 app.sidebar.selectbox[0].set_value("Load").run()

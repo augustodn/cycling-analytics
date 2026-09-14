@@ -221,6 +221,45 @@ class ServiceTests(unittest.TestCase):
             ]
         )
 
+    def test_durability_uses_other_activity_as_90_day_fresh_reference(self):
+        def rows(power):
+            return [
+                {
+                    "elapsed_s": index,
+                    "segment": 0,
+                    "active": True,
+                    "power_w": value,
+                }
+                for index, value in enumerate(power)
+            ]
+
+        self.store.write_activity(
+            "historical",
+            {
+                "start_time": "2026-01-01T00:00:00Z",
+                "elapsed_seconds": 10,
+                "modality": "road",
+                "quality_flags": [],
+            },
+            rows([300] * 10),
+        )
+        self.store.write_activity(
+            "target",
+            {
+                "start_time": "2026-01-02T00:00:00Z",
+                "elapsed_seconds": 20,
+                "modality": "road",
+                "quality_flags": [],
+            },
+            rows([100] * 10 + [300] * 10),
+        )
+
+        result = self.service.durability(
+            DurabilityRequest(activity_id="target", durations=[5], thresholds_kj=[0.5])
+        )
+        assert result.data["fresh_reference"]["5"]["activity_id"] == "historical"
+        assert result.data["fresh_reference"]["5"]["source"] == "historical_90d"
+
     def test_read_only_download_state_reconciliation(self):
         state = self.sources / ".state.json"
         original = json.dumps(
@@ -330,7 +369,7 @@ class ServiceTests(unittest.TestCase):
             ):
                 response = client.post(f"/{endpoint}", json={"activity_id": ident})
                 self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json()["algorithm_version"], "mvp-1")
+                self.assertEqual(response.json()["algorithm_version"], "mvp-2")
             self.assertEqual(
                 client.post("/activity", json={"activity_id": "missing"}).status_code,
                 404,

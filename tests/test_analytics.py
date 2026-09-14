@@ -118,18 +118,22 @@ class AnalyticsTests(unittest.TestCase):
             training_load({}, date(2026, 1, 1), date(2026, 1, 1), 0, 7)
 
     def test_durability_bucket_boundary_and_baseline(self):
-        result = durability(rows([100] * 10), durations=[5], bucket_kj=[0, 0.5])
+        result = durability(
+            rows([100] * 10),
+            durations=[5],
+            thresholds_kj=[0.5],
+            historical_fresh_references={5: {"power_w": 100.0}},
+        )
         self.assertTrue(result["available"])
-        self.assertEqual(result["buckets"][0]["best_w"][5], 100)
-        self.assertEqual(result["buckets"][0]["change_percent"][5], 0.0)
-        self.assertEqual(result["buckets"][1]["best_w"][5], 100)
+        self.assertEqual(result["points"][0]["power_w"], 100)
+        self.assertEqual(result["points"][0]["retention_pct"], 100.0)
 
     def test_durability_rejects_unexplained_gap(self):
         result = durability(
             rows([100] * 5) + rows([100] * 5, start=7), durations=[5], bucket_kj=[0]
         )
-        self.assertFalse(result["available"])
-        self.assertIn("unexplained elapsed gap", result["reason"])
+        self.assertTrue(result["available"])
+        self.assertIn("gaps", result["reason"])
 
     def test_durability_allows_explicit_inactive_pause(self):
         result = durability(

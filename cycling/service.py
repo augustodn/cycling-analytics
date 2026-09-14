@@ -5,6 +5,7 @@ from math import ceil
 from typing import Any
 
 from cycling import ALGORITHM_VERSION, analytics
+from cycling.analytics.durability import calculate_fresh_reference_single
 from cycling.analytics.zones import HR_ZONE_DEFINITIONS
 from cycling.models import (
     ActivityContext,
@@ -219,10 +220,49 @@ class CyclingService:
 
     def durability(self, request: DurabilityRequest):
         activity = self.store.activity(request.activity_id)
+        samples = self.store.samples(request.activity_id)
+
+        # Fresh references come from other activities in the preceding 90 days.
+        # Passing an explicit empty mapping prevents analytics from silently
+        # falling back to the same activity as its own baseline.
+        historical_fresh_refs: dict[int, dict[str, Any]] = {}
+        act_date_str = activity.get("start_time")
+        if act_date_str:
+            act_date = date.fromisoformat(act_date_str[:10])
+            recent_acts = _filter_period_activities(
+                self.store.activities(),
+                activity.get("modality", "unknown"),
+                "custom",
+                act_date - timedelta(days=90),
+                act_date,
+            )
+            for duration_s in request.durations:
+                best_hist = None
+                for candidate in recent_acts:
+                    if candidate["id"] == request.activity_id:
+                        continue
+                    reference = calculate_fresh_reference_single(
+                        self.store.samples(candidate["id"]),
+                        duration_s,
+                        activity_id=candidate["id"],
+                        activity_date=candidate.get("start_time"),
+                        activity_duration_s=candidate.get("duration_s"),
+                    )
+                    if reference and (
+                        best_hist is None or reference["power_w"] > best_hist["power_w"]
+                    ):
+                        best_hist = {**reference, "source": "historical_90d"}
+                if best_hist is not None:
+                    historical_fresh_refs[duration_s] = best_hist
+
         data = analytics.durability(
-            self.store.samples(request.activity_id),
-            request.durations,
-            request.bucket_kj,
+            samples,
+            durations=request.durations,
+            thresholds_kj=request.thresholds_kj,
+            historical_fresh_references=historical_fresh_refs,
+            activity_id=request.activity_id,
+            activity_date=activity.get("start_time"),
+            activity_duration_s=activity.get("duration_s"),
         )
         return self.result(
             "durability",
@@ -230,7 +270,24 @@ class CyclingService:
                 **data,
                 "activity_id": request.activity_id,
                 "durations_s": request.durations,
-                "bucket_kj": request.bucket_kj,
+                "thresholds_kj": request.thresholds_kj,
+                "reference_window_days": 90,
+                "normalizer_version": activity["normalizer_version"],
+                "quality_flags": activity.get("quality_flags", []),
+            },
+        )
+
+    def aerobic_durability(self, request: ActivityRequest):
+        activity = self.store.activity(request.activity_id)
+        data = analytics.calculate_aerobic_durability(
+            self.store.samples(request.activity_id),
+            activity_duration_s=activity.get("duration_s"),
+        )
+        return self.result(
+            "aerobic_durability",
+            {
+                **data,
+                "activity_id": request.activity_id,
                 "normalizer_version": activity["normalizer_version"],
                 "quality_flags": activity.get("quality_flags", []),
             },

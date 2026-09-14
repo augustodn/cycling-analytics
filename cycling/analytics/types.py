@@ -197,7 +197,7 @@ class CTLATLPoint:
 
 @dataclass(frozen=True)
 class DurabilityBucket:
-    """MMP decay performance within a specific prior cumulative work interval."""
+    """Legacy work-bucket representation retained for API consumers."""
 
     start_kj: float
     end_kj: Optional[float]
@@ -211,16 +211,80 @@ class DurabilityBucket:
 
 
 @dataclass(frozen=True)
+class DurabilityPoint:
+    power_w: Optional[float]
+    retention_pct: Optional[float]
+    threshold_kj: float
+    duration_s: int
+    activity_id: Optional[str]
+    start_offset_s: Optional[float]
+    start_work_kj: Optional[float]
+    available_exposure_seconds: float
+    confidence: str
+    state: str
+    evidence: Dict[str, Any]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class FreshReference:
+    power_w: Optional[float]
+    activity_id: Optional[str]
+    date: Optional[str]
+    start_work_kj: Optional[float]
+    source: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class DurabilityResult:
-    """Durability analysis across work exposure buckets."""
+    """Durability analysis across work thresholds with historical fresh reference."""
 
     available: bool
     reason: str
-    buckets: List[Dict[str, Any]] = field(default_factory=list)
-    confidence: Optional[str] = None
+    durations_s: List[int] = field(default_factory=list)
+    fresh_reference: Dict[str, Any] = field(default_factory=dict)
+    points: List[Dict[str, Any]] = field(default_factory=list)
     total_work_kj: Optional[float] = None
     exposure_seconds: int = 0
     coverage: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AerobicDurabilityPoint:
+    threshold_kj: float
+    state: str
+    avg_power: Optional[float]
+    avg_hr: Optional[float]
+    efficiency_factor: Optional[float]
+    retention_pct: Optional[float]
+    efficiency_loss_pct: Optional[float]
+    window_start: Optional[float]
+    window_end: Optional[float]
+    confidence: str
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AerobicDurabilityResult:
+    available: bool
+    reason: str
+    window_duration_s: int
+    thresholds_kj: List[float] = field(default_factory=list)
+    baseline: Dict[str, Any] = field(default_factory=dict)
+    points: List[Dict[str, Any]] = field(default_factory=list)
+    coverage: Dict[str, Any] = field(default_factory=dict)
+    total_work_kj: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

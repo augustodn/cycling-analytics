@@ -202,14 +202,26 @@ class PeriodHRDistributionRequest(Contract):
 
 
 class DurabilityRequest(CurveRequest):
-    bucket_kj: list[float] = Field(
-        default=[0, 500, 1000, 1500], min_length=1, max_length=20
+    thresholds_kj: list[float] = Field(
+        default=[1000.0, 1500.0, 1800.0, 2100.0, 2200.0],
+        min_length=1,
+        max_length=20,
     )
+    durations: list[int] = Field(
+        default=[300, 1200, 1800, 3600],
+        min_length=1,
+        max_length=30,
+    )
+    bucket_kj: list[float] | None = None
 
     @model_validator(mode="after")
-    def ordered_buckets(self):
-        if self.bucket_kj[0] != 0 or any(a >= b for a, b in pairwise(self.bucket_kj)):
-            raise ValueError("buckets must start at zero and strictly increase")
+    def ordered_thresholds(self):
+        if self.bucket_kj is not None:
+            self.thresholds_kj = [value for value in self.bucket_kj if value > 0]
+        if not self.thresholds_kj or any(t < 0 for t in self.thresholds_kj):
+            raise ValueError("thresholds_kj must contain non-negative values")
+        if any(a >= b for a, b in pairwise(self.thresholds_kj)):
+            raise ValueError("thresholds_kj must be strictly increasing")
         return self
 
 

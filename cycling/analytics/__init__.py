@@ -5,7 +5,7 @@ Exposes pure mathematical functions and typed structures for analyzing
 """
 
 from cycling.analytics.drift import aerobic_drift
-from cycling.analytics.durability import durability
+from cycling.analytics.durability import calculate_aerobic_durability, durability
 from cycling.analytics.load import calculate_session_load, training_load
 from cycling.analytics.pipeline import analyze
 from cycling.analytics.power import (
@@ -30,14 +30,18 @@ from cycling.analytics.summaries import (
     summarize_speed,
 )
 from cycling.analytics.types import (
+    AerobicDurabilityPoint,
+    AerobicDurabilityResult,
     CadenceSummary,
     Coverage,
     CTLATLPoint,
     DriftResult,
     DriftSegment,
     DurabilityBucket,
+    DurabilityPoint,
     DurabilityResult,
     ElevationSummary,
+    FreshReference,
     HRSummary,
     LoadResult,
     MMPPoint,
@@ -58,6 +62,7 @@ __all__ = [
     "power_curve",
     "power_curve_detailed",
     "durability",
+    "calculate_aerobic_durability",
     "aerobic_drift",
     "threshold_estimate",
     "training_load",
@@ -83,6 +88,8 @@ __all__ = [
     "PowerSummary",
     "HRSummary",
     "CadenceSummary",
+    "AerobicDurabilityPoint",
+    "AerobicDurabilityResult",
     "SpeedSummary",
     "ElevationSummary",
     "ThreeZoneDistribution",
@@ -93,5 +100,7 @@ __all__ = [
     "LoadResult",
     "CTLATLPoint",
     "DurabilityBucket",
+    "DurabilityPoint",
     "DurabilityResult",
+    "FreshReference",
 ]
