@@ -10,10 +10,13 @@ from unittest.mock import Mock, patch
 from streamlit.testing.v1 import AppTest
 
 from cycling.dashboard import (
+    POWER_SKILL_DURATIONS,
+    POWER_SKILL_INTERVALS,
     _aerobic_durability_plot_payload,
     _durability_plot_payload,
     _power_curve_figure,
     _power_curve_position,
+    _power_skills_figure,
     _render_hr_distribution,
     _weekly_training_figure,
 )
@@ -97,6 +100,33 @@ class DashboardTests(unittest.TestCase):
             (1, _power_curve_position(21600)),
         )
         self.assertEqual(extended_chart.layout.xaxis.ticktext[-1], "6h")
+
+    def test_power_skills_compares_all_time_and_selected_scope(self):
+        import plotly.graph_objects as go
+
+        historical = {
+            str(duration): 600 - index * 20
+            for index, duration in enumerate(POWER_SKILL_DURATIONS)
+        }
+        selected = {
+            str(duration): 500 - index * 15
+            for index, duration in enumerate(POWER_SKILL_DURATIONS)
+        }
+        selected.pop(str(180))
+
+        chart = _power_skills_figure(go, historical, selected, "Selected period")
+
+        labels = [label for _, label, _, _ in POWER_SKILL_INTERVALS]
+        colors = [color for _, _, _, color in POWER_SKILL_INTERVALS]
+        self.assertEqual(len(POWER_SKILL_DURATIONS), 12)
+        self.assertEqual(list(chart.data[0].theta), labels)
+        self.assertEqual(list(chart.data[0].marker.color), colors)
+        self.assertEqual(chart.data[1].name, "All-time maximum")
+        self.assertEqual(chart.data[2].name, "Selected period")
+        self.assertIsNone(list(chart.data[2].r)[labels.index("3m")])
+        self.assertIn("0.25", chart.data[2].fillcolor)
+        self.assertEqual(chart.data[3].text[labels.index("3m")], "520 W")
+        self.assertEqual(list(chart.layout.polar.angularaxis.categoryarray), labels)
 
     def test_weekly_training_figure_uses_requested_hr_zone_colors(self):
         import plotly.graph_objects as go

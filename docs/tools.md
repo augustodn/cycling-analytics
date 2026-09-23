@@ -231,6 +231,10 @@ Streamlit local user interface providing visualization views (all underlying cal
 - **Power curve:** Dual-mode power curve visualization:
   - *Period mode:* Aggregates best observed Mean Maximal Power across activities for selected period (`30d`, `90d`, `365d`, `all`) and modality (`all` or specific) plotted on a log duration scale.
   - *Single Activity mode:* Plotted power duration curve for individual activity.
+  - *Power Skills:* Overlays all-time best and selected-scope watts for Strava's 12
+    Sprinting, Attacking, and Climbing intervals. Historical maxima use the selected
+    modality; personalized milestone levels are not reproduced because thresholds are
+    not published.
 - **Durability:** Work-bucketed MMP decay metrics across progressive kJ expenditure ranges, displaying clear warning banners when power sensor coverage is below 95% or missing (no-power rides).
 - **Load:** Single-modality CTL/ATL/TSB trend chart over custom date ranges with 3-zone polarization distribution (time, session count, or load basis).
 - **Calendar:** Modality-filterable table of recorded activities.

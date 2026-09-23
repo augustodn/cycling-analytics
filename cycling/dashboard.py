@@ -38,6 +38,31 @@ POWER_CURVE_TICKS = (
     (36000, "10h"),
     (86400, "24h"),
 )
+POWER_SKILL_GROUPS = (
+    ("Sprinting", ((15, "15s"), (30, "30s"), (60, "1m")), "#2863C8"),
+    (
+        "Attacking",
+        ((120, "2m"), (180, "3m"), (300, "5m"), (600, "10m")),
+        "#67A936",
+    ),
+    (
+        "Climbing",
+        (
+            (900, "15m"),
+            (1200, "20m"),
+            (1800, "30m"),
+            (2700, "45m"),
+            (3600, "60m"),
+        ),
+        "#EF783A",
+    ),
+)
+POWER_SKILL_INTERVALS = tuple(
+    (duration, label, skill, color)
+    for skill, intervals, color in POWER_SKILL_GROUPS
+    for duration, label in intervals
+)
+POWER_SKILL_DURATIONS = tuple(duration for duration, _, _, _ in POWER_SKILL_INTERVALS)
 
 DURABILITY_STATE_LABELS = (
     (1000.0, "Fresh"),
@@ -114,6 +139,19 @@ def _cached_weekly_cycling_training(data_dir: str, end_date: str) -> dict:
         return result.model_dump(mode="json")
 
 
+@st.cache_data(ttl=300, max_entries=8, show_spinner=False)
+def _cached_all_time_power_skills(data_dir: str, modality: str) -> dict:
+    with Store(data_dir) as store:
+        result = CyclingService(store).period_power_curve(
+            PeriodPowerCurveRequest(
+                period="all",
+                modality=modality,
+                durations=list(POWER_SKILL_DURATIONS),
+            )
+        )
+        return result.model_dump(mode="json")
+
+
 def _format_power_curve_duration(duration_s: int) -> str:
     if duration_s < 60:
         return f"{duration_s}s"
@@ -179,6 +217,123 @@ def _power_curve_figure(
             "rangemode": "tozero",
         },
     )
+
+
+def _power_skills_figure(
+    go, historical_watts: dict, selected_watts: dict, selected_label: str
+):
+    labels = [label for _, label, _, _ in POWER_SKILL_INTERVALS]
+    durations = [duration for duration, _, _, _ in POWER_SKILL_INTERVALS]
+    group_colors = [color for _, _, _, color in POWER_SKILL_INTERVALS]
+    history = [historical_watts.get(str(duration)) for duration in durations]
+    selected = [selected_watts.get(str(duration)) for duration in durations]
+    available = [value for value in (*history, *selected) if value is not None]
+    if not available:
+        return None
+
+    max_watts = max(float(value) for value in available)
+    if max_watts <= 0:
+        return None
+
+    ring_base = max_watts * 1.08
+    ring_width = max_watts * 0.12
+    figure = go.Figure(
+        go.Barpolar(
+            r=[ring_width] * len(labels),
+            theta=labels,
+            width=[360 / len(labels)] * len(labels),
+            base=[ring_base] * len(labels),
+            marker_color=group_colors,
+            marker_line_color="white",
+            marker_line_width=1,
+            hoverinfo="skip",
+            showlegend=False,
+            name="Power skill groups",
+        )
+    )
+    figure.add_trace(
+        go.Scatterpolar(
+            r=history,
+            theta=labels,
+            mode="lines+markers",
+            fill="toself",
+            fillcolor="rgba(126, 68, 165, 0.62)",
+            line={"color": "#7E44A5", "width": 2},
+            connectgaps=False,
+            name="All-time maximum",
+            hovertemplate="%{theta}: %{r:.0f} W<extra>%{fullData.name}</extra>",
+        )
+    )
+    figure.add_trace(
+        go.Scatterpolar(
+            r=selected,
+            theta=labels,
+            mode="lines+markers",
+            fill="toself",
+            fillcolor="rgba(40, 150, 220, 0.25)",
+            line={"color": "#2896DC", "width": 2},
+            connectgaps=False,
+            name=selected_label,
+            hovertemplate="%{theta}: %{r:.0f} W<extra>%{fullData.name}</extra>",
+        )
+    )
+    figure.add_trace(
+        go.Scatterpolar(
+            r=[max_watts * 1.29 if value is not None else None for value in history],
+            theta=labels,
+            text=[
+                f"{float(value):.0f} W" if value is not None else ""
+                for value in history
+            ],
+            mode="text",
+            textfont={"size": 10},
+            hoverinfo="skip",
+            showlegend=False,
+            name="All-time watt labels",
+        )
+    )
+    figure.update_layout(
+        title="Power Skills — Best Power by Interval",
+        height=680,
+        legend={"orientation": "h", "y": -0.12},
+        polar={
+            "radialaxis": {
+                "visible": True,
+                "range": [0, max_watts * 1.55],
+                "ticksuffix": " W",
+                "gridcolor": "rgba(128, 128, 128, 0.35)",
+            },
+            "angularaxis": {
+                "categoryorder": "array",
+                "categoryarray": labels,
+                "direction": "clockwise",
+                "rotation": 90,
+            },
+        },
+    )
+    return figure
+
+
+def _render_power_skills(
+    st, go, historical_data: dict, selected_data: dict, selected_label: str
+) -> None:
+    st.subheader("Power Skills")
+    st.caption(
+        "Intervals: Sprinting 15s–1m (blue), Attacking 2–10m (green), and Climbing "
+        "15–60m (orange). Solid fill: all-time maximum; translucent fill: selection. "
+        "All-time reference uses the same modality. Values are watts; Strava's personalized "
+        "milestone thresholds are not public."
+    )
+    figure = _power_skills_figure(
+        go,
+        historical_data.get("watts", {}),
+        selected_data.get("watts", {}),
+        selected_label,
+    )
+    if figure is None:
+        st.info("No valid power efforts are available for the Power Skills intervals.")
+        return
+    st.plotly_chart(figure, width="stretch")
 
 
 def _weekly_training_figure(go, data: dict):
@@ -1123,10 +1278,15 @@ def run():
                     + sorted({a.get("modality", "unknown") for a in activities}),
                 )
                 try:
+                    curve_durations = sorted(
+                        set(PeriodPowerCurveRequest().durations)
+                        | set(POWER_SKILL_DURATIONS)
+                    )
                     result = service.period_power_curve(
                         PeriodPowerCurveRequest(
                             period=period,
                             modality=modality,
+                            durations=curve_durations,
                             start_date=start_date,
                             end_date=end_date,
                         )
@@ -1141,6 +1301,20 @@ def run():
                         st.warning(
                             "No power data found for the selected period/modality."
                         )
+                    historical_data = (
+                        result.data
+                        if period == "all"
+                        else _cached_all_time_power_skills(settings.data_dir, modality)[
+                            "data"
+                        ]
+                    )
+                    _render_power_skills(
+                        st,
+                        go,
+                        historical_data,
+                        result.data,
+                        "Selected period",
+                    )
                     st.json(result.model_dump(mode="json"))
                 except Exception as exc:
                     st.error(f"Error computing period power curve: {exc}")
@@ -1235,13 +1409,30 @@ def run():
 
         elif page == "Power curve":
             try:
-                result = service.power_curve(CurveRequest(activity_id=ident))
+                curve_durations = sorted(
+                    set(CurveRequest(activity_id=ident).durations)
+                    | set(POWER_SKILL_DURATIONS)
+                )
+                result = service.power_curve(
+                    CurveRequest(activity_id=ident, durations=curve_durations)
+                )
                 curve = result.data.get("watts", {})
                 chart = _power_curve_figure(go, curve, result.data.get("durations_s"))
                 if chart is not None:
                     st.plotly_chart(chart, width="stretch")
                 else:
                     st.warning("No power data available for this activity.")
+                modality = chosen.get("modality") or "unknown"
+                historical_data = _cached_all_time_power_skills(
+                    settings.data_dir, modality
+                )["data"]
+                _render_power_skills(
+                    st,
+                    go,
+                    historical_data,
+                    result.data,
+                    "Selected activity",
+                )
                 st.json(result.model_dump(mode="json"))
             except Exception as exc:
                 st.error(f"Power curve unavailable: {exc}")
