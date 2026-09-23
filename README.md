@@ -27,12 +27,14 @@ To run the complete download → ingest → dashboard flow:
 ./scripts/run_pipeline.sh
 ```
 
-Pass any downloader option, for example `./scripts/run_pipeline.sh --limit 10`.
-By default the downloader opens its persistent Chromium profile and asks for a
-manual Strava login when needed. For an already authenticated regular Chrome:
+With no arguments, the script launches Google Chrome with a persistent
+`.strava-chrome` profile and downloads up to 10 activities through CDP. Log in to
+Strava in that Chrome window if needed. Downloader arguments are still forwarded
+unchanged, for example `./scripts/run_pipeline.sh --limit 10`. To attach to a
+Chrome you launched separately:
 
 ```bash
-./scripts/run_pipeline.sh --cdp-url http://127.0.0.1:9222
+./scripts/run_pipeline.sh --cdp-url http://127.0.0.1:9222 --limit 10
 ```
 
 Use `STRAVA_OUTPUT_DIR` or `CYCLING_DATA_DIR` to override the default directories.

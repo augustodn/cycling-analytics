@@ -12,9 +12,35 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 Usage: ./scripts/run_pipeline.sh [downloader options]
 
 Runs the Strava downloader, ingests local FIT/TCX files, then starts the dashboard.
-Downloader options are forwarded to strava_fetcher/download.py.
+With no options, starts Chrome with CDP and downloads up to 10 activities.
+Downloader options are forwarded to strava_fetcher/download.py as before.
 EOF
     exit 0
+fi
+
+if [[ "$#" -eq 0 ]]; then
+    if ! command -v google-chrome-stable >/dev/null 2>&1; then
+        printf '%s\n' 'google-chrome-stable was not found in PATH.' >&2
+        exit 1
+    fi
+
+    printf '%s\n' 'Starting Google Chrome with remote debugging...'
+    google-chrome-stable \
+        --remote-debugging-port=9222 \
+        --user-data-dir="$PWD/.strava-chrome" &
+
+    for _ in {1..30}; do
+        if (exec 3<>/dev/tcp/127.0.0.1/9222) 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    if ! (exec 3<>/dev/tcp/127.0.0.1/9222) 2>/dev/null; then
+        printf '%s\n' 'Chrome did not start its remote debugging server on port 9222.' >&2
+        exit 1
+    fi
+
+    set -- --cdp-url http://127.0.0.1:9222 --limit 10
 fi
 
 printf '%s\n' '1/3 Downloading original activity files...'
