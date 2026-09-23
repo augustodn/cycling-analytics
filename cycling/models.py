@@ -202,6 +202,45 @@ class PeriodHRDistributionRequest(Contract):
         return self
 
 
+class ProgressRequest(Contract):
+    period: Literal["7d", "21d", "30d", "90d", "365d", "all", "custom"] = "all"
+    modality: Literal["indoor", "road", "mtb", "gravel", "unknown", "all"] = "all"
+    parameter_mode: Literal["historical", "current"] = "historical"
+    start_date: date | None = None
+    end_date: date | None = None
+    compare_previous: bool = False
+    durations: list[int] = Field(
+        default=[300, 1200, 3600, 7200, 10800],
+        min_length=1,
+        max_length=30,
+    )
+    fatigue_thresholds_kj: list[float] = Field(
+        default=[1000.0, 1500.0, 1800.0],
+        min_length=1,
+        max_length=20,
+    )
+
+    @model_validator(mode="after")
+    def ordered_dates(self):
+        if any(d < 1 or d > 86400 for d in self.durations):
+            raise ValueError("durations must be between 1 and 86400 seconds")
+        if any(t < 0 for t in self.fatigue_thresholds_kj):
+            raise ValueError("fatigue_thresholds_kj must be non-negative")
+        if any(a >= b for a, b in pairwise(self.fatigue_thresholds_kj)):
+            raise ValueError("fatigue_thresholds_kj must be strictly increasing")
+        if self.period == "custom" and (
+            self.start_date is None or self.end_date is None
+        ):
+            raise ValueError("custom period requires start_date and end_date")
+        if (
+            self.start_date is not None
+            and self.end_date is not None
+            and self.end_date < self.start_date
+        ):
+            raise ValueError("end_date must not precede start_date")
+        return self
+
+
 class DurabilityRequest(CurveRequest):
     thresholds_kj: list[float] = Field(
         default=[1000.0, 1500.0, 1800.0, 2100.0, 2200.0],

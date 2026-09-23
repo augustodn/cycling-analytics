@@ -118,6 +118,21 @@ class DashboardTests(unittest.TestCase):
                 app.sidebar.selectbox[0].set_value("Overview").run()
                 self.assertEqual(len(app.exception), 0)
 
+                # Progress
+                app.sidebar.selectbox[0].set_value("Progress").run()
+                self.assertEqual(len(app.exception), 0)
+                if len(app.selectbox) > 0:
+                    app.selectbox[0].set_value("90d").run()
+                    self.assertEqual(len(app.exception), 0)
+                    app.selectbox[0].set_value("Custom range").run()
+                    self.assertEqual(len(app.exception), 0)
+                if len(app.selectbox) > 1:
+                    app.selectbox[1].set_value("all").run()
+                    self.assertEqual(len(app.exception), 0)
+                if len(app.checkbox) > 0:
+                    app.checkbox[0].set_value(True).run()
+                    self.assertEqual(len(app.exception), 0)
+
                 # Calendar
                 app.sidebar.selectbox[0].set_value("Calendar").run()
                 self.assertEqual(len(app.exception), 0)

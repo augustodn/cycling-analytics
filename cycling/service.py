@@ -17,6 +17,7 @@ from cycling.models import (
     LoadRequest,
     PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
+    ProgressRequest,
     StreamRequest,
     ToolResult,
 )
@@ -130,7 +131,12 @@ class CyclingService:
             request.parameter_mode,
         )
 
-    def analyze_activity(self, request: ActivityRequest, force=False):
+    def analyze_activity(
+        self,
+        request: ActivityRequest,
+        force=False,
+        samples: list[dict[str, Any]] | None = None,
+    ):
         activity, ident, parameters = self.settings(request)
         key = encode(
             [
@@ -147,9 +153,10 @@ class CyclingService:
         if cached:
             return ToolResult.model_validate(cached)
         rpe = request.rpe if request.rpe is not None else activity.get("rpe")
-        metrics = analytics.analyze(
-            self.store.samples(request.activity_id), parameters, rpe
+        samples_data = (
+            samples if samples is not None else self.store.samples(request.activity_id)
         )
+        metrics = analytics.analyze(samples_data, parameters, rpe)
         result = self.result(
             "analyze_activity",
             {
@@ -577,6 +584,408 @@ class CyclingService:
             {"parameters": self.store.parameter_history()},
         )
 
+    def _progress_fresh_references(
+        self,
+        activities: list[dict[str, Any]],
+        durations: list[int],
+        sample_cache: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Calculate each candidate's fresh reference once for a progress request."""
+        if not activities:
+            return {}
+
+        target_dates = [date.fromisoformat(a["start_time"][:10]) for a in activities]
+        lower = min(target_dates) - timedelta(days=90)
+        upper = max(target_dates)
+        candidates = [
+            activity
+            for activity in self.store.activities()
+            if lower <= date.fromisoformat(activity["start_time"][:10]) <= upper
+        ]
+
+        references: dict[str, dict[str, Any]] = {}
+        min_dur = min(durations) if durations else None
+        for candidate in candidates:
+            if "missing_power_w" in candidate.get("quality_flags", []):
+                continue
+            cand_dur = candidate.get("duration_s")
+            if cand_dur is not None and min_dur is not None and cand_dur < min_dur:
+                continue
+            cand_id = candidate["id"]
+            if sample_cache is not None and cand_id in sample_cache:
+                candidate_samples = sample_cache[cand_id]
+            else:
+                candidate_samples = self.store.samples(
+                    cand_id,
+                    columns=("timestamp", "elapsed_s", "segment", "active", "power_w"),
+                )
+                if sample_cache is not None:
+                    sample_cache[cand_id] = candidate_samples
+
+            candidate_references = calculate_fresh_references(
+                candidate_samples,
+                durations,
+                activity_id=cand_id,
+                activity_date=candidate.get("start_time"),
+                activity_duration_s=candidate.get("duration_s"),
+            )
+            if candidate_references:
+                references[cand_id] = {
+                    "activity": candidate,
+                    "references": candidate_references,
+                }
+        return references
+
+    def progress(self, request: ProgressRequest):
+        activities = _filter_period_activities(
+            self.store.activities(),
+            request.modality,
+            request.period,
+            request.start_date,
+            request.end_date,
+        )
+
+        sample_cache: dict[str, list[dict[str, Any]]] = {}
+
+        durations = request.durations
+        best_watts: dict[int, float | None] = {d: None for d in durations}
+        best_records: dict[int, dict[str, Any] | None] = {d: None for d in durations}
+        per_activity_pdc = []
+        activities_with_metrics = []
+
+        for activity in sorted(activities, key=lambda a: a["start_time"]):
+            act_id = activity["id"]
+            if act_id in sample_cache:
+                samples = sample_cache[act_id]
+            else:
+                samples = self.store.samples(act_id)
+                sample_cache[act_id] = samples
+
+            curve = analytics.power_curve(samples, durations)
+
+            act_watts = {str(d): curve.get(d) for d in durations}
+            per_activity_pdc.append(
+                {
+                    "activity_id": act_id,
+                    "date": activity["start_time"][:10],
+                    "modality": activity.get("modality", "unknown"),
+                    "watts": act_watts,
+                }
+            )
+
+            for d in durations:
+                w = curve.get(d)
+                if w is not None:
+                    if best_watts[d] is None or w > best_watts[d]:
+                        best_watts[d] = w
+                        best_records[d] = {
+                            "activity_id": act_id,
+                            "start_time": activity.get("start_time"),
+                        }
+
+            res = self.analyze_activity(
+                ActivityRequest(
+                    activity_id=act_id, parameter_mode=request.parameter_mode
+                ),
+                samples=samples,
+            )
+            metrics = res.data.get("metrics") or {}
+            activities_with_metrics.append(
+                {
+                    "activity": activity,
+                    "samples": samples,
+                    "metrics": metrics,
+                    "declared_parameters": res.data.get("declared_parameters") or {},
+                    "result": res,
+                }
+            )
+
+        previous_period_data = None
+        if request.compare_previous:
+            prev_start = None
+            prev_end = None
+            if request.period in PERIOD_DAYS:
+                days = PERIOD_DAYS[request.period]
+                ref_date = request.end_date or (
+                    max(date.fromisoformat(a["start_time"][:10]) for a in activities)
+                    if activities
+                    else date.today()
+                )
+                cur_start = ref_date - timedelta(days=days)
+                prev_end = cur_start - timedelta(days=1)
+                prev_start = prev_end - timedelta(days=days - 1)
+            elif request.period == "custom" and request.start_date and request.end_date:
+                span = (request.end_date - request.start_date).days
+                prev_end = request.start_date - timedelta(days=1)
+                prev_start = prev_end - timedelta(days=span)
+
+            if prev_start and prev_end:
+                prev_activities = _filter_period_activities(
+                    self.store.activities(),
+                    request.modality,
+                    "custom",
+                    prev_start,
+                    prev_end,
+                )
+                prev_best_watts: dict[int, float | None] = {d: None for d in durations}
+                prev_best_records: dict[int, dict[str, Any] | None] = {
+                    d: None for d in durations
+                }
+                for prev_act in prev_activities:
+                    prev_id = prev_act["id"]
+                    if prev_id in sample_cache:
+                        prev_samples = sample_cache[prev_id]
+                    else:
+                        prev_samples = self.store.samples(prev_id)
+                        sample_cache[prev_id] = prev_samples
+                    prev_curve = analytics.power_curve(prev_samples, durations)
+                    for d in durations:
+                        pw = prev_curve.get(d)
+                        if pw is not None:
+                            if prev_best_watts[d] is None or pw > prev_best_watts[d]:
+                                prev_best_watts[d] = pw
+                                prev_best_records[d] = {
+                                    "activity_id": prev_act["id"],
+                                    "start_time": prev_act.get("start_time"),
+                                }
+                previous_period_data = {
+                    "start_date": prev_start.isoformat(),
+                    "end_date": prev_end.isoformat(),
+                    "activity_count": len(prev_activities),
+                    "watts": {str(d): prev_best_watts[d] for d in durations},
+                    "records": {str(d): prev_best_records[d] for d in durations},
+                }
+
+        power_duration_evolution = {
+            "durations_s": durations,
+            "current_period": {
+                "activity_count": len(activities),
+                "watts": {str(d): best_watts[d] for d in durations},
+                "records": {str(d): best_records[d] for d in durations},
+            },
+            "previous_period": previous_period_data,
+            "per_activity": per_activity_pdc,
+        }
+
+        fixed_hr_ef_trend = [
+            analytics.calculate_fixed_hr_ef_trend_point(
+                item["activity"], item["samples"]
+            )
+            for item in activities_with_metrics
+        ]
+
+        fresh_references = self._progress_fresh_references(
+            activities, [1200], sample_cache=sample_cache
+        )
+        durability_trend = []
+        for item in activities_with_metrics:
+            act = item["activity"]
+            act_id = act["id"]
+            act_date = date.fromisoformat(act["start_time"][:10])
+            historical_fresh_refs: dict[int, dict[str, Any]] = {}
+            for candidate_data in fresh_references.values():
+                candidate = candidate_data["activity"]
+                candidate_date = date.fromisoformat(candidate["start_time"][:10])
+                if (
+                    candidate["id"] != act_id
+                    and candidate.get("modality", "unknown")
+                    == act.get("modality", "unknown")
+                    and act_date - timedelta(days=90) <= candidate_date <= act_date
+                ):
+                    reference = candidate_data["references"].get(1200)
+                    if reference is not None:
+                        current = historical_fresh_refs.get(1200)
+                        if current is None or reference["power_w"] > current["power_w"]:
+                            historical_fresh_refs[1200] = {
+                                **reference,
+                                "source": "historical_90d",
+                            }
+
+            dur_data = analytics.durability(
+                item["samples"],
+                durations=[1200],
+                thresholds_kj=[1500.0, 1800.0],
+                historical_fresh_references=historical_fresh_refs,
+                activity_id=act_id,
+                activity_date=act.get("start_time"),
+                activity_duration_s=act.get("duration_s"),
+            )
+            aerobic_dur_res = analytics.calculate_aerobic_durability(
+                item["samples"], activity_duration_s=act.get("duration_s")
+            )
+
+            points = dur_data.get("points", [])
+            p_1500 = next(
+                (
+                    p
+                    for p in points
+                    if p["threshold_kj"] == 1500.0 and p["duration_s"] == 1200
+                ),
+                None,
+            )
+            p_1800 = next(
+                (
+                    p
+                    for p in points
+                    if p["threshold_kj"] == 1800.0 and p["duration_s"] == 1200
+                ),
+                None,
+            )
+
+            aerobic_points = aerobic_dur_res.get("points", [])
+            ef_1500 = next(
+                (p for p in aerobic_points if p["threshold_kj"] == 1500.0), None
+            )
+            ef_1800 = next(
+                (p for p in aerobic_points if p["threshold_kj"] == 1800.0), None
+            )
+
+            durability_trend.append(
+                {
+                    "activity_id": act_id,
+                    "date": act["start_time"][:10],
+                    "modality": act.get("modality", "unknown"),
+                    "total_work_kj": dur_data.get("total_work_kj"),
+                    "retention_20m_1500kj": p_1500.get("retention_pct")
+                    if p_1500
+                    else None,
+                    "retention_20m_1800kj": p_1800.get("retention_pct")
+                    if p_1800
+                    else None,
+                    "ef_retention_1500kj": ef_1500.get("retention_pct")
+                    if ef_1500
+                    else None,
+                    "ef_retention_1800kj": ef_1800.get("retention_pct")
+                    if ef_1800
+                    else None,
+                    "confidence": p_1500.get("confidence") if p_1500 else "LOW",
+                    "available": dur_data.get("available", False),
+                    "unavailable_reason": None
+                    if dur_data.get("available")
+                    else dur_data.get("reason"),
+                }
+            )
+
+        decoupling_trend = []
+        for item in activities_with_metrics:
+            act = item["activity"]
+            act_id = act["id"]
+            drift_res = item["metrics"].get("drift") or {}
+            decoupling_trend.append(
+                {
+                    "activity_id": act_id,
+                    "date": act["start_time"][:10],
+                    "modality": act.get("modality", "unknown"),
+                    "duration_s": drift_res.get("duration_s"),
+                    "drift_percent": drift_res.get("drift_percent"),
+                    "power_cv": drift_res.get("power_cv"),
+                    "confidence": drift_res.get("confidence", "low"),
+                    "available": drift_res.get("available", False),
+                    "unavailable_reason": None
+                    if drift_res.get("available")
+                    else drift_res.get("reason"),
+                }
+            )
+
+        weekly_composition = analytics.calculate_weekly_composition(
+            activities_with_metrics
+        )
+
+        fatigue_thresholds = request.fatigue_thresholds_kj
+        fatigued_period_best: dict[str, dict[str, float | None]] = {
+            str(t): {str(d): None for d in durations} for t in fatigue_thresholds
+        }
+        per_activity_fatigued = []
+
+        for item in activities_with_metrics:
+            act = item["activity"]
+            act_id = act["id"]
+            fatigued_act = analytics.calculate_fatigued_pdc_for_activity(
+                item["samples"],
+                durations,
+                fatigue_thresholds,
+                activity_duration_s=act.get("duration_s"),
+            )
+            per_activity_fatigued.append(
+                {
+                    "activity_id": act_id,
+                    "date": act["start_time"][:10],
+                    "modality": act.get("modality", "unknown"),
+                    "total_work_kj": fatigued_act["total_work_kj"],
+                    "watts_after_thresholds": fatigued_act["watts_after_thresholds"],
+                }
+            )
+
+            for t in fatigue_thresholds:
+                t_str = str(t)
+                act_watts = fatigued_act["watts_after_thresholds"].get(t_str, {})
+                for d in durations:
+                    pw = act_watts.get(str(d))
+                    if pw is not None:
+                        if (
+                            fatigued_period_best[t_str][str(d)] is None
+                            or pw > fatigued_period_best[t_str][str(d)]
+                        ):
+                            fatigued_period_best[t_str][str(d)] = pw
+
+        fatigued_pdc_summary = []
+        for t in fatigue_thresholds:
+            t_str = str(t)
+            watts_map = fatigued_period_best[t_str]
+            has_any = any(w is not None for w in watts_map.values())
+            fatigued_pdc_summary.append(
+                {
+                    "threshold_kj": t,
+                    "watts": watts_map,
+                    "available": has_any,
+                    "reason": "Best observed power after work threshold"
+                    if has_any
+                    else "No qualifying activity reached work threshold with valid contiguous power",
+                }
+            )
+
+        fatigued_pdc = {
+            "fatigue_thresholds_kj": fatigue_thresholds,
+            "durations_s": durations,
+            "period_maxima": fatigued_pdc_summary,
+            "per_activity": per_activity_fatigued,
+        }
+
+        threshold_evidence_trend = []
+        for item in activities_with_metrics:
+            act = item["activity"]
+            act_id = act["id"]
+            threshold_data = item["metrics"].get("threshold_estimate") or {}
+            threshold_evidence_trend.append(
+                {
+                    "activity_id": act_id,
+                    "date": act["start_time"][:10],
+                    "modality": act.get("modality", "unknown"),
+                    "observed_20m_w": threshold_data.get("observed_20m_w"),
+                    "ftp_estimate_w": threshold_data.get("watts"),
+                    "declared_ftp_w": item["declared_parameters"].get("ftp_w"),
+                    "available": threshold_data.get("available", False),
+                    "reason": threshold_data.get("reason"),
+                }
+            )
+
+        return self.result(
+            "progress",
+            {
+                "period": request.period,
+                "modality": request.modality,
+                "activities_evaluated": len(activities),
+                "power_duration_evolution": power_duration_evolution,
+                "fixed_hr_ef_trend": fixed_hr_ef_trend,
+                "durability_trend": durability_trend,
+                "decoupling_trend": decoupling_trend,
+                "weekly_composition": weekly_composition,
+                "fatigued_pdc": fatigued_pdc,
+                "threshold_evidence_trend": threshold_evidence_trend,
+            },
+            parameter_mode=request.parameter_mode,
+        )
+
     # Semantic integration aliases
     def get_activity_stream(self, request: StreamRequest):
         return self.stream(request)
@@ -595,3 +1004,6 @@ class CyclingService:
 
     def estimate_thresholds(self, request: ActivityRequest):
         return self.thresholds(request)
+
+    def get_progress(self, request: ProgressRequest):
+        return self.progress(request)

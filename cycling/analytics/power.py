@@ -103,6 +103,7 @@ def threshold_estimate(samples: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     best_20m = curve[1200]
     return {
         "available": best_20m is not None,
+        "observed_20m_w": best_20m,
         "watts": 0.95 * best_20m if best_20m is not None else None,
         "reason": "95% of best observed 20-minute power; low-confidence estimate",
     }

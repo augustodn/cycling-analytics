@@ -6,8 +6,11 @@ after download. Python 3.13 and `uv` are required. Existing
 
 ## Quick start
 
+
+
 ```bash
 uv sync
+google-chrome-stable   --remote-debugging-port=9222   --user-data-dir="$PWD/.strava-chrome"
 uv run python -m cycling ingest downloads/strava --new-only
 uv run python -m cycling activities list --limit 10 --modality all
 uv run python -m cycling dashboard

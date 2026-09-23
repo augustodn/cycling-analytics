@@ -4,7 +4,7 @@ import json
 import os
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Sequence
 from uuid import uuid4
 
 import duckdb
@@ -354,14 +354,16 @@ class Store:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def samples(self, ident: str):
+    def samples(self, ident: str, columns: Sequence[str] | None = None):
         act = self.activity(ident)
         if not act.get("sample_path"):
             return []
         sample_file = self.root / act["sample_path"]
         if not sample_file.is_file():
             return []
-        return pq.read_table(sample_file).to_pylist()
+        return pq.read_table(
+            sample_file, columns=list(columns) if columns else None
+        ).to_pylist()
 
     def delete_activity(self, ident: str) -> dict:
         """Remove one catalog activity and its derived data."""

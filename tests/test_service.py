@@ -24,6 +24,7 @@ from cycling.models import (
     LoadRequest,
     PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
+    ProgressRequest,
     StreamRequest,
 )
 from cycling.service import CyclingService
@@ -642,6 +643,86 @@ class ServiceTests(unittest.TestCase):
         code, res = cli("reprocess", "--from", "invalid-date", check=False)
         self.assertEqual(code, 2)
         self.assertIn("error", res)
+
+    def test_progress_empty_period(self):
+        req = ProgressRequest(
+            period="custom",
+            start_date=date(2020, 1, 1),
+            end_date=date(2020, 1, 7),
+            compare_previous=True,
+        )
+        res = self.service.progress(req)
+        self.assertEqual(res.operation, "progress")
+        self.assertEqual(res.data["activities_evaluated"], 0)
+        self.assertEqual(
+            res.data["power_duration_evolution"]["current_period"]["activity_count"], 0
+        )
+        self.assertEqual(res.data["weekly_composition"], [])
+
+    def test_progress_ingested_activity(self):
+        self.ingest()
+        req = ProgressRequest(period="all", compare_previous=True)
+        res = self.service.progress(req)
+        self.assertEqual(res.operation, "progress")
+        self.assertEqual(res.data["activities_evaluated"], 1)
+
+        data = res.data
+        self.assertIn("power_duration_evolution", data)
+        self.assertIn("fixed_hr_ef_trend", data)
+        self.assertIn("durability_trend", data)
+        self.assertIn("decoupling_trend", data)
+        self.assertIn("weekly_composition", data)
+        self.assertIn("fatigued_pdc", data)
+        self.assertIn("threshold_evidence_trend", data)
+
+        # Alias test
+        alias_res = self.service.get_progress(req)
+        self.assertEqual(alias_res.operation, "progress")
+
+    def test_progress_samples_reuse(self):
+        self.ingest()
+        call_counts = {}
+        orig_samples = self.store.samples
+
+        def tracking_samples(activity_id, **kwargs):
+            call_counts[activity_id] = call_counts.get(activity_id, 0) + 1
+            return orig_samples(activity_id, **kwargs)
+
+        self.store.samples = tracking_samples
+        req = ProgressRequest(period="all", compare_previous=True)
+        res = self.service.progress(req)
+        self.assertEqual(res.operation, "progress")
+        for act_id, count in call_counts.items():
+            self.assertEqual(count, 1, f"Activity {act_id} samples read {count} times")
+
+    def test_analyze_activity_samples_param(self):
+        self.ingest()
+        act = self.store.activities()[0]
+        samples = self.store.samples(act["id"])
+        call_count = 0
+        orig_samples = self.store.samples
+
+        def tracking_samples(activity_id):
+            nonlocal call_count
+            call_count += 1
+            return orig_samples(activity_id)
+
+        self.store.samples = tracking_samples
+        req = ActivityRequest(activity_id=act["id"])
+        # Pass pre-loaded samples with force=True to ensure compute uses passed samples without store read
+        res = self.service.analyze_activity(req, force=True, samples=samples)
+        self.assertEqual(res.operation, "analyze_activity")
+        self.assertEqual(
+            call_count,
+            0,
+            "store.samples should not be called when samples parameter is provided",
+        )
+
+    def test_progress_validation(self):
+        with self.assertRaises(ValidationError):
+            ProgressRequest(durations=[-5])
+        with self.assertRaises(ValidationError):
+            ProgressRequest(period="custom", start_date=None)
 
 
 if __name__ == "__main__":

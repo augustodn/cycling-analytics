@@ -73,7 +73,7 @@ gantt
 - **Acceptance Criteria:**
   1. CLI commands provide rich filtering options: `activities list` supports `--limit` and `--modality`; `power-curve` supports single activity ID or period mode (`--period`, `--modality`, `--end-date`) with `power-curves` CLI alias; `reprocess` supports `--metric`, `--from`, and `--all`.
   2. FastAPI server binds exclusively to `127.0.0.1`, exposing `GET /health`, `GET /status`, `GET /activities`, `POST /power-curve`, `POST /power-curves`, `POST /durability`, `POST /load`, etc., passing OpenAPI validation.
-  3. Streamlit dashboard renders 6 views: Overview (status, recent activities, load summary), Activity (metrics JSON, interactive stream chart, threshold estimate), Power curve (period and single activity log plots), Durability (MMP decay and missing power warnings), Load (CTL/ATL/TSB chart and 3-zone distribution), and Calendar (filterable activity list) without direct SQL execution.
+  3. Streamlit dashboard renders 7 views: Overview (status, recent activities, load summary), Progress (longitudinal power, efficiency, durability, drift, composition, fatigued-PDC, and threshold evidence), Activity (metrics JSON, interactive stream chart, threshold estimate), Power curve (period and single activity log plots), Durability (MMP decay and missing power warnings), Load (CTL/ATL/TSB chart and 3-zone distribution), and Calendar (filterable activity list) without direct SQL execution.
   4. Empty catalog states and failed ingestion files trigger user-friendly error components in the dashboard.
 
 ---

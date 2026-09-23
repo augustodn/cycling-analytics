@@ -15,6 +15,11 @@ from cycling.analytics.power import (
     power_curve_detailed,
     threshold_estimate,
 )
+from cycling.analytics.progress import (
+    calculate_fatigued_pdc_for_activity,
+    calculate_fixed_hr_ef_trend_point,
+    calculate_weekly_composition,
+)
 from cycling.analytics.rolling import (
     calculate_coverage,
     extract_runs,
@@ -70,6 +75,9 @@ __all__ = [
     "calculate_session_load",
     "calculate_zone_seconds",
     "calculate_hr_zone_distribution",
+    "calculate_weekly_composition",
+    "calculate_fatigued_pdc_for_activity",
+    "calculate_fixed_hr_ef_trend_point",
     "summarize_power",
     "summarize_hr",
     "summarize_cadence",

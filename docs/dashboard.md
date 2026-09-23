@@ -133,6 +133,27 @@ previous day's CTL minus ATL and approximates freshness. Daily load selects powe
 then HR, then session RPE according to available sensor coverage. The dashboard also
 shows modality-specific summaries for comparison.
 
+### View 4: Longitudinal Progress View
+
+The Progress view aggregates activity-level evidence through `CyclingService.progress`
+and keeps all calculations outside Streamlit. It supports period and modality filters,
+historical/current parameter mode, and previous-period comparison for power-duration
+curves.
+
+It renders:
+
+- Power-duration evolution, including per-activity curves and current-period maxima.
+- Power and efficiency factor in stable ten-minute windows near fixed heart-rate targets,
+  separated by modality and indoor/outdoor environment.
+- Power and aerobic durability retention at 1500/1800 kJ.
+- Aerobic decoupling trend, weekly three-zone composition, fatigued power-duration
+  curves, and observed 20-minute/FTP evidence.
+
+Missing sensors and insufficient exposure remain null and are reported as unavailable;
+the view never fabricates power for heart-rate-only activities. Fixed-heart-rate points
+require contiguous paired power/HR data and a low-variability window, so sparse charts
+are expected for short or variable rides.
+
 ---
 
 ## Precomputation & Query Optimization

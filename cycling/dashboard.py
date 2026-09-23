@@ -12,6 +12,7 @@ from cycling.models import (
     LoadRequest,
     PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
+    ProgressRequest,
     StreamRequest,
 )
 from cycling.service import CyclingService
@@ -81,6 +82,15 @@ def _cached_performance_durability(
                 durations=list(durations_s),
                 thresholds_kj=list(thresholds_kj),
             )
+        )
+        return result.model_dump(mode="json")
+
+
+@st.cache_data(max_entries=8, show_spinner=False)
+def _cached_progress(data_dir: str, request_json: str) -> dict:
+    with Store(data_dir) as store:
+        result = CyclingService(store).progress(
+            ProgressRequest.model_validate_json(request_json)
         )
         return result.model_dump(mode="json")
 
@@ -363,6 +373,7 @@ def run():
             "View",
             [
                 "Overview",
+                "Progress",
                 "Activity",
                 "Power curve",
                 "Heart rate distribution",
@@ -533,6 +544,438 @@ def run():
                 if payload is not None:
                     with st.expander(label):
                         st.json(payload)
+            return
+
+        if page == "Progress":
+            st.subheader("Longitudinal Progress")
+            modalities = ["all"] + sorted(
+                {a.get("modality", "unknown") for a in activities if a.get("modality")}
+            )
+            period, start_date, end_date = _period_filter(st, activities, "progress")
+            if period == "custom" and (start_date is None or end_date is None):
+                st.warning("Select both a start date and an end date.")
+                return
+
+            modality = st.selectbox("Modality", modalities, key="progress_modality")
+            compare_prev = st.checkbox(
+                "Compare previous period for PDC",
+                value=False,
+                key="progress_compare_prev",
+                disabled=period == "all",
+            )
+            if period == "all":
+                st.caption("Previous-period comparison requires a bounded period.")
+
+            try:
+                progress_request = ProgressRequest(
+                    period=period,
+                    modality=modality,
+                    parameter_mode=mode,
+                    start_date=start_date,
+                    end_date=end_date,
+                    compare_previous=compare_prev,
+                )
+                with st.spinner("Computing progress..."):
+                    progress_payload = _cached_progress(
+                        settings.data_dir, progress_request.model_dump_json()
+                    )
+                data = progress_payload["data"]
+            except Exception as exc:
+                st.error(f"Progress data unavailable: {exc}")
+                return
+
+            if not data.get("activities_evaluated", 0):
+                st.info("No activities found for the selected filter.")
+                with st.expander("Raw Progress Data"):
+                    st.json(progress_payload)
+                return
+
+            # Stage 1: PDC evolution, Fixed-HR/EF trend, Durability trend
+            st.markdown("### Stage 1: Power & Efficiency Trends")
+
+            # 1. PDC evolution
+            pdc_evo = data.get("power_duration_evolution", {})
+            durations_s = pdc_evo.get("durations_s", [])
+            cur_p = pdc_evo.get("current_period", {})
+            cur_watts = cur_p.get("watts", {})
+            prev_p = pdc_evo.get("previous_period")
+            per_act_pdc = pdc_evo.get("per_activity", [])
+
+            st.markdown("#### Power-Duration Curve Evolution")
+            if cur_watts:
+                cols = st.columns(len(durations_s))
+                for idx, d in enumerate(durations_s):
+                    d_str = str(d)
+                    label = _format_power_curve_duration(d)
+                    val = cur_watts.get(d_str)
+                    val_str = f"{val:.0f} W" if val is not None else "N/A"
+                    delta_str = None
+                    if prev_p and prev_p.get("watts"):
+                        prev_val = prev_p["watts"].get(d_str)
+                        if val is not None and prev_val is not None and prev_val > 0:
+                            diff = val - prev_val
+                            pct = (diff / prev_val) * 100
+                            delta_str = f"{diff:+.0f} W ({pct:+.1f}%)"
+                    cols[idx % len(cols)].metric(
+                        label=label, value=val_str, delta=delta_str
+                    )
+
+            if per_act_pdc:
+                fig_pdc = go.Figure()
+                for d in durations_s:
+                    d_str = str(d)
+                    dates = [
+                        a["date"]
+                        for a in per_act_pdc
+                        if a.get("watts", {}).get(d_str) is not None
+                    ]
+                    watts_vals = [
+                        a["watts"][d_str]
+                        for a in per_act_pdc
+                        if a.get("watts", {}).get(d_str) is not None
+                    ]
+                    if watts_vals:
+                        fig_pdc.add_scatter(
+                            x=dates,
+                            y=watts_vals,
+                            mode="lines+markers",
+                            name=_format_power_curve_duration(d),
+                        )
+                fig_pdc.update_layout(
+                    title="Per-Activity Best Power by Duration Over Time",
+                    xaxis_title="Date",
+                    yaxis_title="Power (W)",
+                )
+                st.plotly_chart(fig_pdc, width="stretch")
+            else:
+                st.info("No per-activity power duration data available.")
+
+            # 2. Fixed-HR/EF trend
+            st.markdown("#### Fixed-HR Power and Efficiency Factor (EF) Trend")
+            st.caption(
+                "Each point uses a 10-minute contiguous stable window within ±5 bpm of "
+                "the target. Indoor and outdoor activities are shown separately."
+            )
+            ef_pts = data.get("fixed_hr_ef_trend", [])
+            fixed_hr_points = []
+            for point in ef_pts:
+                if not point.get("available"):
+                    continue
+                environment = "Indoor" if point.get("is_indoor") else "Outdoor"
+                for target, values in (point.get("fixed_hr_targets") or {}).items():
+                    if values and values.get("power_w") is not None:
+                        fixed_hr_points.append(
+                            {
+                                "date": point["date"],
+                                "modality": point.get("modality", "unknown"),
+                                "environment": environment,
+                                "target": target,
+                                "power_w": values["power_w"],
+                                "ef": values.get("ef"),
+                            }
+                        )
+
+            if not fixed_hr_points:
+                st.info("No stable Fixed-HR EF points available in this period.")
+            else:
+                series = {}
+                for point in fixed_hr_points:
+                    key = (
+                        point["modality"],
+                        point["environment"],
+                        point["target"],
+                    )
+                    series.setdefault(key, []).append(point)
+
+                fig_fixed_power = go.Figure()
+                fig_fixed_ef = go.Figure()
+                for (mod_name, environment, target), points in sorted(series.items()):
+                    label = f"{mod_name} · {environment} · {target} bpm"
+                    fig_fixed_power.add_scatter(
+                        x=[p["date"] for p in points],
+                        y=[p["power_w"] for p in points],
+                        mode="lines+markers",
+                        name=label,
+                    )
+                    ef_points = [p for p in points if p["ef"] is not None]
+                    if ef_points:
+                        fig_fixed_ef.add_scatter(
+                            x=[p["date"] for p in ef_points],
+                            y=[p["ef"] for p in ef_points],
+                            mode="lines+markers",
+                            name=label,
+                        )
+
+                fig_fixed_power.update_layout(
+                    title="Power at Fixed Heart Rate",
+                    xaxis_title="Date",
+                    yaxis_title="Power (W)",
+                )
+                st.plotly_chart(fig_fixed_power, width="stretch")
+                if fig_fixed_ef.data:
+                    fig_fixed_ef.update_layout(
+                        title="Efficiency Factor at Fixed Heart Rate",
+                        xaxis_title="Date",
+                        yaxis_title="Efficiency Factor (W/bpm)",
+                    )
+                    st.plotly_chart(fig_fixed_ef, width="stretch")
+
+            # 3. Durability trend
+            st.markdown("#### Durability Trend")
+            dur_pts = data.get("durability_trend", [])
+            avail_dur = [p for p in dur_pts if p.get("available")]
+            unavail_count = len(dur_pts) - len(avail_dur)
+            if unavail_count > 0:
+                st.warning(
+                    f"{unavail_count} of {len(dur_pts)} activities lack sufficient work volume for 20m retention calculation."
+                )
+
+            if not dur_pts:
+                st.info("No durability points evaluated.")
+            else:
+                fig_dur = go.Figure()
+                # 1500 kJ retention
+                pts_1500 = [
+                    (p["date"], p["retention_20m_1500kj"])
+                    for p in dur_pts
+                    if p.get("retention_20m_1500kj") is not None
+                ]
+                if pts_1500:
+                    fig_dur.add_scatter(
+                        x=[x[0] for x in pts_1500],
+                        y=[x[1] for x in pts_1500],
+                        mode="lines+markers",
+                        name="Power Retention 20m @ 1500 kJ (%)",
+                    )
+                # 1800 kJ retention
+                pts_1800 = [
+                    (p["date"], p["retention_20m_1800kj"])
+                    for p in dur_pts
+                    if p.get("retention_20m_1800kj") is not None
+                ]
+                if pts_1800:
+                    fig_dur.add_scatter(
+                        x=[x[0] for x in pts_1800],
+                        y=[x[1] for x in pts_1800],
+                        mode="lines+markers",
+                        name="Power Retention 20m @ 1800 kJ (%)",
+                    )
+                # EF retention 1500 kJ
+                ef_pts_1500 = [
+                    (p["date"], p["ef_retention_1500kj"])
+                    for p in dur_pts
+                    if p.get("ef_retention_1500kj") is not None
+                ]
+                if ef_pts_1500:
+                    fig_dur.add_scatter(
+                        x=[x[0] for x in ef_pts_1500],
+                        y=[x[1] for x in ef_pts_1500],
+                        mode="lines+markers",
+                        name="EF Retention @ 1500 kJ (%)",
+                    )
+                # EF retention 1800 kJ
+                ef_pts_1800 = [
+                    (p["date"], p["ef_retention_1800kj"])
+                    for p in dur_pts
+                    if p.get("ef_retention_1800kj") is not None
+                ]
+                if ef_pts_1800:
+                    fig_dur.add_scatter(
+                        x=[x[0] for x in ef_pts_1800],
+                        y=[x[1] for x in ef_pts_1800],
+                        mode="lines+markers",
+                        name="EF Retention @ 1800 kJ (%)",
+                    )
+
+                if pts_1500 or pts_1800 or ef_pts_1500 or ef_pts_1800:
+                    fig_dur.update_layout(
+                        title="Longitudinal Durability Retention Trend",
+                        xaxis_title="Date",
+                        yaxis_title="Retention (%)",
+                    )
+                    st.plotly_chart(fig_dur, width="stretch")
+                else:
+                    st.info(
+                        "No complete retention data points accumulated in this period."
+                    )
+
+            # Stage 2: Decoupling, Weekly composition, Fatigued PDC, Threshold evidence
+            st.markdown("---")
+            st.markdown("### Stage 2: Aerobic Drift, Volume Composition & FTP Evidence")
+
+            # 1. Decoupling trend
+            st.markdown("#### Decoupling (Aerobic Drift) Trend")
+            dec_pts = data.get("decoupling_trend", [])
+            avail_dec = [
+                p
+                for p in dec_pts
+                if p.get("available") and p.get("drift_percent") is not None
+            ]
+            if not avail_dec:
+                st.info("No decoupling/drift points available in this period.")
+            else:
+                fig_dec = go.Figure()
+                fig_dec.add_scatter(
+                    x=[p["date"] for p in avail_dec],
+                    y=[p["drift_percent"] for p in avail_dec],
+                    mode="lines+markers",
+                    name="Drift (%)",
+                )
+                fig_dec.add_hline(
+                    y=5.0,
+                    line_dash="dash",
+                    line_color="orange",
+                    annotation_text="5% threshold",
+                )
+                fig_dec.update_layout(
+                    title="Aerobic Decoupling Trend",
+                    xaxis_title="Date",
+                    yaxis_title="Drift (%)",
+                )
+                st.plotly_chart(fig_dec, width="stretch")
+
+            # 2. Weekly composition
+            st.markdown("#### Weekly Composition & Zone Distribution")
+            weekly = data.get("weekly_composition", [])
+            if not weekly:
+                st.info("No weekly composition data available.")
+            else:
+                fig_week = go.Figure()
+                weeks = [w["iso_week"] for w in weekly]
+                z1_pct = [w.get("three_zone_percentages", [0, 0, 0])[0] for w in weekly]
+                z2_pct = [w.get("three_zone_percentages", [0, 0, 0])[1] for w in weekly]
+                z3_pct = [w.get("three_zone_percentages", [0, 0, 0])[2] for w in weekly]
+
+                fig_week.add_bar(x=weeks, y=z1_pct, name="Zone 1 (%)")
+                fig_week.add_bar(x=weeks, y=z2_pct, name="Zone 2 (%)")
+                fig_week.add_bar(x=weeks, y=z3_pct, name="Zone 3 (%)")
+                fig_week.update_layout(
+                    barmode="stack",
+                    title="Weekly 3-Zone Intensity Composition (%)",
+                    xaxis_title="ISO Week",
+                    yaxis_title="Percentage (%)",
+                )
+                st.plotly_chart(fig_week, width="stretch")
+
+                # Show contextual details & caveats per week
+                weekly_summary = []
+                for w in weekly:
+                    caveats_text = "; ".join(w.get("caveats", [])) or "None"
+                    longest = w.get("longest_ride") or {}
+                    longest_str = (
+                        f"{longest.get('duration_s', 0) / 3600:.1f}h ({longest.get('modality', 'N/A')})"
+                        if longest
+                        else "None"
+                    )
+                    weekly_summary.append(
+                        {
+                            "Week": w["iso_week"],
+                            "Start Date": w["start_date"],
+                            "Hours": w.get("total_hours"),
+                            "Load": w.get("total_load"),
+                            "Longest Ride": longest_str,
+                            "Caveats": caveats_text,
+                        }
+                    )
+                st.dataframe(weekly_summary)
+
+            # 3. Fatigued PDC
+            st.markdown("#### Fatigued Power-Duration Curve")
+            fat_pdc = data.get("fatigued_pdc", {})
+            maxima = fat_pdc.get("period_maxima", [])
+            if not maxima:
+                st.info("No fatigued PDC data available.")
+            else:
+                fig_fat = go.Figure()
+                for item in maxima:
+                    thresh_kj = item["threshold_kj"]
+                    watts_map = item.get("watts", {})
+                    if item.get("available") and watts_map:
+                        pts = [
+                            (int(d), w) for d, w in watts_map.items() if w is not None
+                        ]
+                        pts.sort(key=lambda x: x[0])
+                        if pts:
+                            fig_fat.add_scatter(
+                                x=[_power_curve_position(d) for d, _ in pts],
+                                y=[w for _, w in pts],
+                                mode="lines+markers",
+                                name=f"After {thresh_kj:g} kJ",
+                                customdata=[
+                                    [_format_power_curve_duration(d)] for d, _ in pts
+                                ],
+                                hovertemplate="Duration: %{customdata[0]}<br>Power: %{y:.0f} W<extra></extra>",
+                            )
+                    else:
+                        st.caption(f"After {thresh_kj:g} kJ: {item.get('reason')}")
+
+                if fig_fat.data:
+                    fig_fat.update_layout(
+                        title="Period Best Fatigued Power Curve",
+                        xaxis_title="Duration",
+                        yaxis_title="Power (W)",
+                    )
+                    st.plotly_chart(fig_fat, width="stretch")
+
+            # 4. Threshold / FTP evidence trend
+            st.markdown("#### Threshold / FTP Evidence Trend")
+            thresh_pts = data.get("threshold_evidence_trend", [])
+            if not thresh_pts:
+                st.info("No threshold evidence points available.")
+            else:
+                fig_th = go.Figure()
+                obs_pts = [
+                    (p["date"], p["observed_20m_w"])
+                    for p in thresh_pts
+                    if p.get("observed_20m_w") is not None
+                ]
+                if obs_pts:
+                    fig_th.add_scatter(
+                        x=[x[0] for x in obs_pts],
+                        y=[x[1] for x in obs_pts],
+                        mode="lines+markers",
+                        name="Observed 20m Power (W)",
+                    )
+
+                est_pts = [
+                    (p["date"], p["ftp_estimate_w"])
+                    for p in thresh_pts
+                    if p.get("ftp_estimate_w") is not None
+                ]
+                if est_pts:
+                    fig_th.add_scatter(
+                        x=[x[0] for x in est_pts],
+                        y=[x[1] for x in est_pts],
+                        mode="lines+markers",
+                        name="FTP Estimate (95% of 20m) (W)",
+                    )
+
+                dec_pts = [
+                    (p["date"], p["declared_ftp_w"])
+                    for p in thresh_pts
+                    if p.get("declared_ftp_w") is not None
+                ]
+                if dec_pts:
+                    fig_th.add_scatter(
+                        x=[x[0] for x in dec_pts],
+                        y=[x[1] for x in dec_pts],
+                        mode="lines",
+                        line=dict(dash="dash"),
+                        name="Declared FTP (W)",
+                    )
+
+                if fig_th.data:
+                    fig_th.update_layout(
+                        title="FTP & 20-Minute Power Evidence Trend",
+                        xaxis_title="Date",
+                        yaxis_title="Power (W)",
+                    )
+                    st.plotly_chart(fig_th, width="stretch")
+                else:
+                    st.info("No observed 20-minute power or FTP evidence available.")
+
+            with st.expander("Raw Progress Data"):
+                st.json(progress_payload)
             return
 
         if page == "Calendar":
