@@ -47,7 +47,14 @@ def _text(value):
     )
 
 
+def _is_virtual_indoor_platform(*values):
+    text = " ".join(str(value) for value in values if value is not None).casefold()
+    return "zwift" in text or "mywhoosh" in text
+
+
 def _modality(*values):
+    if _is_virtual_indoor_platform(*values):
+        return "indoor"
     text = " ".join(_text(v) for v in values if v is not None)
     for name in ("mtb", "mountain", "gravel", "road", "indoor", "trainer"):
         if name in text:
@@ -372,7 +379,11 @@ def parse_file(path: Path) -> tuple[dict, list[dict]]:
     """Parse one original activity file into metadata and raw canonical rows."""
     name = path.name.lower()
     if name.endswith(".tcx") or name.endswith(".tcx.gz"):
-        return _tcx(path)
-    if name.endswith(".fit") or name.endswith(".fit.gz"):
-        return _fit(path)
-    raise ValueError(f"unsupported activity format: {path.suffix}")
+        metadata, rows = _tcx(path)
+    elif name.endswith(".fit") or name.endswith(".fit.gz"):
+        metadata, rows = _fit(path)
+    else:
+        raise ValueError(f"unsupported activity format: {path.suffix}")
+    if _is_virtual_indoor_platform(path.name):
+        metadata["modality"] = "indoor"
+    return metadata, rows

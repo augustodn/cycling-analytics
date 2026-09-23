@@ -94,6 +94,16 @@ def fit_bytes():
 
 
 class ParserTests(unittest.TestCase):
+    def test_zwift_and_mywhoosh_source_names_classify_as_indoor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for platform in ("Zwift", "MyWhoosh"):
+                path = Path(directory) / f"ride_{platform}.tcx"
+                path.write_text(tcx_text())
+                metadata, rows = normalize(*parse_file(path))
+
+                self.assertEqual(metadata["modality"], "indoor")
+                self.assertNotIn("unknown_modality", metadata["quality_flags"])
+
     def test_tcx_sensors_coordinates_embedded_time(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "1999-01-01_wrong.tcx"
