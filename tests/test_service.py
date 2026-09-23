@@ -503,6 +503,24 @@ class ServiceTests(unittest.TestCase):
         )
         self.assertEqual(outside_res.data["activities_evaluated"], 0)
 
+    def test_weekly_cycling_training_combines_modalities_and_hr_zones(self):
+        (self.sources / "indoor.tcx").write_text(
+            tcx_text().replace("Synthetic device", "Indoor trainer")
+        )
+        self.ingest()
+
+        result = self.service.weekly_cycling_training(date(2026, 1, 1))
+
+        self.assertEqual(result.operation, "weekly_cycling_training")
+        self.assertEqual(len(result.data["weeks"]), 12)
+        week = next(row for row in result.data["weeks"] if row["activity_count"])
+        self.assertEqual(week["activity_count"], 2)
+        self.assertGreater(week["hr_zone_seconds"][2], 0)
+        self.assertAlmostEqual(
+            week["total_seconds"],
+            sum(week["hr_zone_seconds"]) + week["unclassified_seconds"],
+        )
+
     def test_semantic_service_aliases(self):
         ident = self.ingest()
         req_act = ActivityRequest(activity_id=ident)

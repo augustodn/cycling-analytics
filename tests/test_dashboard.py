@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from streamlit.testing.v1 import AppTest
 
@@ -14,6 +14,8 @@ from cycling.dashboard import (
     _durability_plot_payload,
     _power_curve_figure,
     _power_curve_position,
+    _render_hr_distribution,
+    _weekly_training_figure,
 )
 from cycling.ingestion import ingest
 from cycling.storage import Store
@@ -95,6 +97,93 @@ class DashboardTests(unittest.TestCase):
             (1, _power_curve_position(21600)),
         )
         self.assertEqual(extended_chart.layout.xaxis.ticktext[-1], "6h")
+
+    def test_weekly_training_figure_uses_requested_hr_zone_colors(self):
+        import plotly.graph_objects as go
+
+        zones = [
+            {"label": label}
+            for label in (
+                "1 Recovery",
+                "2 Aerobic",
+                "3 Tempo",
+                "4 SubThreshold",
+                "5a Threshold",
+                "5b Aerobic Capacity",
+                "5c Anaerobic",
+            )
+        ]
+        data = {
+            "weeks": [
+                {
+                    "iso_week": "2026-W01",
+                    "total_seconds": 3600,
+                    "hr_zone_seconds": [1] * 7,
+                    "unclassified_seconds": 3593,
+                }
+            ],
+            "zones": zones,
+        }
+
+        figure = _weekly_training_figure(go, data)
+
+        colors = {trace.name: trace.marker.color for trace in figure.data}
+        self.assertEqual(colors["1 Recovery"], "#808080")
+        self.assertEqual(colors["2 Aerobic"], "#87CEEB")
+        self.assertEqual(colors["3 Tempo"], "#228B22")
+        self.assertEqual(colors["4 SubThreshold"], "#FFD700")
+        self.assertEqual(colors["5a Threshold"], "#FF69B4")
+        self.assertEqual(colors["5b Aerobic Capacity"], "#FF0000")
+        self.assertEqual(colors["5c Anaerobic"], "#8A2BE2")
+        self.assertEqual(colors["Unclassified / no HR"], "#D3D3D3")
+
+    def test_hr_distribution_uses_weekly_training_zone_colors(self):
+        import plotly.graph_objects as go
+
+        st = Mock()
+        st.columns.return_value = [Mock(), Mock()]
+        zones = [
+            {
+                "label": label,
+                "percentage_range": "",
+                "hr_range": "",
+            }
+            for label in (
+                "1 Recovery",
+                "2 Aerobic",
+                "3 Tempo",
+                "4 SubThreshold",
+                "5a Threshold",
+                "5b Aerobic Capacity",
+                "5c Anaerobic",
+            )
+        ]
+
+        _render_hr_distribution(
+            st,
+            go,
+            {
+                "seconds": [1] * len(zones),
+                "percentages": [100 / len(zones)] * len(zones),
+                "zones": zones,
+            },
+            "No HR data",
+            show_table=False,
+        )
+
+        chart = st.plotly_chart.call_args.args[0]
+        self.assertEqual(
+            list(chart.data[0].marker.color),
+            [
+                "#808080",
+                "#87CEEB",
+                "#228B22",
+                "#FFD700",
+                "#FF69B4",
+                "#FF0000",
+                "#8A2BE2",
+            ],
+        )
 
     def test_all_views_and_empty_catalog(self):
         with tempfile.TemporaryDirectory() as temporary:

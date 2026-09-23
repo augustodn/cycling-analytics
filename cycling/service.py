@@ -416,6 +416,72 @@ class CyclingService:
             parameter_mode=request.parameter_mode,
         )
 
+    def weekly_cycling_training(self, end_date: date, weeks: int = 12):
+        """Aggregate weekly cycling time and fixed HR-zone exposure."""
+        if weeks < 1:
+            raise ValueError("weeks must be at least one")
+
+        current_week = end_date - timedelta(days=end_date.weekday())
+        first_week = current_week - timedelta(days=7 * (weeks - 1))
+        zone_definitions = analytics.calculate_hr_zone_distribution([])["zones"]
+        weekly = {
+            week_start: {
+                "week_start": week_start.isoformat(),
+                "iso_week": f"{week_start.isocalendar().year}-W{week_start.isocalendar().week:02d}",
+                "activity_count": 0,
+                "total_seconds": 0.0,
+                "hr_zone_seconds": [0] * len(zone_definitions),
+                "unclassified_seconds": 0.0,
+            }
+            for week_start in (
+                first_week + timedelta(days=7 * index) for index in range(weeks)
+            )
+        }
+
+        cycling_modalities = {"indoor", "road", "mtb", "gravel"}
+        for activity in self.store.activities():
+            if (
+                activity.get("sport") != "cycling"
+                and activity.get("modality", "unknown") not in cycling_modalities
+            ):
+                continue
+
+            activity_date = date.fromisoformat(activity["start_time"][:10])
+            week_start = activity_date - timedelta(days=activity_date.weekday())
+            if week_start not in weekly or activity_date > end_date:
+                continue
+
+            distribution = analytics.calculate_hr_zone_distribution(
+                self.store.samples(activity["id"])
+            )
+            zone_seconds = distribution["seconds"]
+            known_hr_seconds = sum(zone_seconds)
+            sampled_seconds = known_hr_seconds + distribution["unknown_seconds"]
+            activity_seconds = max(
+                float(activity.get("duration_s") or 0), sampled_seconds
+            )
+
+            bucket = weekly[week_start]
+            bucket["activity_count"] += 1
+            bucket["total_seconds"] += activity_seconds
+            bucket["hr_zone_seconds"] = [
+                total + seconds
+                for total, seconds in zip(
+                    bucket["hr_zone_seconds"], zone_seconds, strict=True
+                )
+            ]
+            bucket["unclassified_seconds"] += activity_seconds - known_hr_seconds
+
+        return self.result(
+            "weekly_cycling_training",
+            {
+                "start_date": first_week.isoformat(),
+                "end_date": end_date.isoformat(),
+                "weeks": list(weekly.values()),
+                "zones": zone_definitions,
+            },
+        )
+
     def thresholds(self, request: ActivityRequest):
         _, ident, parameters = self.settings(request)
         curve = analytics.power_curve(self.store.samples(request.activity_id), [1200])

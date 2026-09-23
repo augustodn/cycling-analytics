@@ -133,6 +133,10 @@ previous day's CTL minus ATL and approximates freshness. Daily load selects powe
 then HR, then session RPE according to available sensor coverage. The dashboard also
 shows modality-specific summaries for comparison.
 
+Overview places a 12-week stacked column chart before CTL. It combines cycling
+modalities and shows time in each heart-rate zone, plus unclassified time so weekly
+bar heights represent total recorded cycling hours.
+
 ### View 4: Longitudinal Progress View
 
 The Progress view aggregates activity-level evidence through `CyclingService.progress`

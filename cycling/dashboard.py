@@ -48,6 +48,16 @@ DURABILITY_STATE_LABELS = (
 )
 OVERVIEW_PERIODS = ("7d", "21d", "30d", "90d", "365d", "all")
 OVERVIEW_DURABILITY_MIN_DURATION_S = 90 * 60
+HR_ZONE_COLORS = {
+    "1 Recovery": "#808080",
+    "2 Aerobic": "#87CEEB",
+    "3 Tempo": "#228B22",
+    "4 SubThreshold": "#FFD700",
+    "5a Threshold": "#FF69B4",
+    "5b Aerobic Capacity": "#FF0000",
+    "5c Anaerobic": "#8A2BE2",
+}
+UNCLASSIFIED_HR_COLOR = "#D3D3D3"
 
 LOAD_CURVE_EXPLANATION = (
     "CTL (fitness) is a 42-day exponentially weighted average of daily load; "
@@ -91,6 +101,15 @@ def _cached_progress(data_dir: str, request_json: str) -> dict:
     with Store(data_dir) as store:
         result = CyclingService(store).progress(
             ProgressRequest.model_validate_json(request_json)
+        )
+        return result.model_dump(mode="json")
+
+
+@st.cache_data(ttl=300, max_entries=8, show_spinner=False)
+def _cached_weekly_cycling_training(data_dir: str, end_date: str) -> dict:
+    with Store(data_dir) as store:
+        result = CyclingService(store).weekly_cycling_training(
+            date.fromisoformat(end_date)
         )
         return result.model_dump(mode="json")
 
@@ -160,6 +179,47 @@ def _power_curve_figure(
             "rangemode": "tozero",
         },
     )
+
+
+def _weekly_training_figure(go, data: dict):
+    weeks = data.get("weeks", [])
+    labels = [week["iso_week"] for week in weeks]
+    total_hours = [week["total_seconds"] / 3600 for week in weeks]
+    figure = go.Figure()
+
+    for zone_index, zone in enumerate(data.get("zones", [])):
+        figure.add_bar(
+            x=labels,
+            y=[week["hr_zone_seconds"][zone_index] / 3600 for week in weeks],
+            name=zone["label"],
+            marker_color=HR_ZONE_COLORS[zone["label"]],
+            customdata=[[hours] for hours in total_hours],
+            hovertemplate=(
+                "%{x}<br>%{fullData.name}: %{y:.2f} h"
+                "<br>Total cycling: %{customdata[0]:.2f} h<extra></extra>"
+            ),
+        )
+
+    figure.add_bar(
+        x=labels,
+        y=[week["unclassified_seconds"] / 3600 for week in weeks],
+        name="Unclassified / no HR",
+        marker_color=UNCLASSIFIED_HR_COLOR,
+        customdata=[[hours] for hours in total_hours],
+        hovertemplate=(
+            "%{x}<br>%{fullData.name}: %{y:.2f} h"
+            "<br>Total cycling: %{customdata[0]:.2f} h<extra></extra>"
+        ),
+    )
+    figure.update_layout(
+        barmode="stack",
+        title="Weekly Cycling Hours and HR Zones (Last 12 Weeks)",
+        xaxis_title="ISO week",
+        yaxis_title="Training time (hours)",
+        yaxis={"rangemode": "tozero"},
+        legend_title="Heart rate zone",
+    )
+    return figure
 
 
 def _durability_state_label(threshold_kj: float) -> str:
@@ -267,6 +327,7 @@ def _render_hr_distribution(
         go.Bar(
             x=labels,
             y=percentages,
+            marker_color=[HR_ZONE_COLORS[label] for label in labels],
             text=[f"{percentage:.1f}%" for percentage in percentages],
             textposition="auto",
         )
@@ -397,9 +458,25 @@ def run():
             hr_result = None
             durability_payload = None
 
+            end = datetime.now(UTC).date()
+            st.subheader("Weekly Cycling Training")
+            st.caption(
+                "All cycling modalities combined. HR-zone segments use the same zones "
+                "as Heart Rate Distribution; remainder includes time without classified HR."
+            )
+            try:
+                training_payload = _cached_weekly_cycling_training(
+                    settings.data_dir, end.isoformat()
+                )
+                st.plotly_chart(
+                    _weekly_training_figure(go, training_payload["data"]),
+                    width="stretch",
+                )
+            except Exception as exc:
+                st.error(f"Weekly cycling training unavailable: {exc}")
+
             st.subheader("CTL")
             try:
-                end = datetime.now(UTC).date()
                 start = end - timedelta(days=90)
                 load_result = service.load(
                     LoadRequest(
