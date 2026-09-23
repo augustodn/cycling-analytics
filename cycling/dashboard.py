@@ -152,6 +152,19 @@ def _cached_all_time_power_skills(data_dir: str, modality: str) -> dict:
         return result.model_dump(mode="json")
 
 
+@st.cache_data(ttl=300, max_entries=16, show_spinner=False)
+def _cached_power_hr_zone_mismatch(
+    data_dir: str, period: str, environment: str, parameter_mode: str
+) -> dict:
+    with Store(data_dir) as store:
+        result = CyclingService(store).power_hr_zone_mismatch(
+            period=period,
+            environment=environment,
+            parameter_mode=parameter_mode,
+        )
+        return result.model_dump(mode="json")
+
+
 def _format_power_curve_duration(duration_s: int) -> str:
     if duration_s < 60:
         return f"{duration_s}s"
@@ -377,6 +390,77 @@ def _weekly_training_figure(go, data: dict):
     return figure
 
 
+def _power_hr_mismatch_figure(go, data: dict):
+    points = data.get("points", [])
+    if not points:
+        return None
+    figure = go.Figure(
+        go.Scatter(
+            x=[point["timestamp"] for point in points],
+            y=[point["mismatch"] for point in points],
+            mode="markers",
+            marker={"size": 5, "opacity": 0.45},
+            customdata=[
+                [
+                    point["representative_power_w"],
+                    point["representative_hr_bpm"],
+                    point["power_zone"],
+                    point["hr_zone"],
+                ]
+                for point in points
+            ],
+            hovertemplate=(
+                "%{x}<br>Mismatch: %{y:+.0f} zones"
+                "<br>Power: %{customdata[0]:.0f} W (Z%{customdata[2]})"
+                "<br>HR: %{customdata[1]:.0f} bpm (Z%{customdata[3]})"
+                "<extra></extra>"
+            ),
+            name="Valid windows",
+        )
+    )
+    figure.add_scatter(
+        x=[point["timestamp"] for point in points],
+        y=[point["mismatch_30d"] for point in points],
+        mode="lines",
+        line={"width": 3},
+        name="30-day rolling mean",
+    )
+    figure.add_hline(y=0, line_dash="dash", line_color="gray")
+    figure.update_layout(
+        title="HR–Power Zone Mismatch",
+        xaxis_title="Date",
+        yaxis_title="Power zone − HR zone",
+        yaxis={"dtick": 1},
+    )
+    return figure
+
+
+def _power_hr_mismatch_matrix(go, data: dict):
+    seconds = data.get("matrix_seconds", [])
+    if not seconds or not any(any(row) for row in seconds):
+        return None
+    values = [[value / 60 for value in row] for row in seconds]
+    text = [[f"{value:.0f}" if value else "" for value in row] for row in values]
+    figure = go.Figure(
+        go.Heatmap(
+            z=values,
+            x=[zone["label"] for zone in data.get("power_zones", [])],
+            y=[zone["label"] for zone in data.get("hr_zones", [])],
+            text=text,
+            texttemplate="%{text}",
+            colorscale="Blues",
+            colorbar={"title": "Minutes"},
+            hovertemplate="%{y} × %{x}: %{z:.0f} min<extra></extra>",
+        )
+    )
+    figure.update_layout(
+        title="Valid exposure by HR and power zone",
+        xaxis_title="Power zone",
+        yaxis_title="Heart-rate zone",
+    )
+    return figure
+
+
 def _durability_state_label(threshold_kj: float) -> str:
     for upper_bound, label in DURABILITY_STATE_LABELS:
         if threshold_kj < upper_bound:
@@ -590,6 +674,7 @@ def run():
             [
                 "Overview",
                 "Progress",
+                "FTP Calibration",
                 "Activity",
                 "Power curve",
                 "Heart rate distribution",
@@ -605,6 +690,220 @@ def run():
             st.info(
                 "No activities. Run: uv run python -m cycling ingest downloads/strava"
             )
+            return
+
+        if page == "FTP Calibration":
+            st.subheader("FTP calibration evidence")
+            st.caption(
+                "Zone mismatch is an accumulating comparison, not an FTP test. "
+                "Indoor and outdoor data are analyzed separately."
+            )
+            period_col, environment_col = st.columns(2)
+            period = period_col.selectbox(
+                "Period", ["30d", "90d", "365d", "all"], index=1
+            )
+            environment = environment_col.selectbox(
+                "Environment", ["indoor", "outdoor"], index=1
+            )
+            try:
+                with st.spinner("Analyzing HR–power windows..."):
+                    result = _cached_power_hr_zone_mismatch(
+                        settings.data_dir, period, environment, mode
+                    )
+                data = result["data"]
+            except Exception as exc:
+                st.error(f"FTP calibration evidence unavailable: {exc}")
+                return
+
+            chart_col, evidence_col = st.columns([2, 1])
+            with chart_col:
+                figure = _power_hr_mismatch_figure(go, data)
+                if figure is None:
+                    st.info("No windows meet the data-coverage criteria.")
+                else:
+                    st.plotly_chart(figure, width="stretch")
+                st.caption(
+                    "Each point is an 8-minute window stepped every minute. Windows are "
+                    "valid with ≥90% power and HR coverage. Power uses a 5%-trimmed mean; "
+                    "HR uses the median. Stability and cadence affect quality, not validity."
+                )
+            with evidence_col:
+                valid_hours = data.get("valid_seconds", 0) / 3600
+                mismatch_30d = data.get("mismatch_30d")
+                st.metric(
+                    "30-day mismatch",
+                    f"{mismatch_30d:+.2f}" if mismatch_30d is not None else "N/A",
+                )
+                st.metric(
+                    "Valid sampled exposure",
+                    f"{valid_hours:.1f} h · {data.get('valid_windows', 0)} windows",
+                )
+                st.metric(
+                    "HR Z2 / power Z3",
+                    f"{data['hr_zone_2_power_zone_3_pct']:.1f}%"
+                    if data.get("hr_zone_2_power_zone_3_pct") is not None
+                    else "N/A",
+                )
+                st.metric(
+                    "Median Pw:HR drift",
+                    f"{data['median_pw_hr_drift_pct']:.1f}%"
+                    if data.get("median_pw_hr_drift_pct") is not None
+                    else "N/A",
+                )
+                st.metric("Data-volume confidence", data.get("data_confidence", "LOW"))
+                st.caption(
+                    f"Drift available in {data.get('pw_hr_drift_activities', 0)} activities. "
+                    "Confidence reflects valid-window volume only, not physiological certainty."
+                )
+
+                declared_ftp = data.get("declared_ftp_w")
+                observed_ftp = data.get("best_20m_ftp_estimate_w")
+                st.markdown("**Power-duration evidence**")
+                st.write(
+                    f"Declared FTP: {declared_ftp:.0f} W"
+                    if declared_ftp is not None
+                    else "Declared FTP: unavailable"
+                )
+                st.write(
+                    f"Best observed 20 min: {data['best_observed_20m_w']:.0f} W"
+                    if data.get("best_observed_20m_w") is not None
+                    else "Best observed 20 min: unavailable"
+                )
+                st.write(
+                    f"Best observed 60 min: {data['best_observed_60m_w']:.0f} W"
+                    if data.get("best_observed_60m_w") is not None
+                    else "Best observed 60 min: unavailable"
+                )
+                st.write(
+                    f"95% of best 20 min: {observed_ftp:.0f} W"
+                    if observed_ftp is not None
+                    else "95% of best 20 min: unavailable"
+                )
+                st.caption(
+                    "20-minute estimate is a low-confidence heuristic, not a measured FTP."
+                )
+
+                if mismatch_30d is None:
+                    st.info("Not enough valid windows to assess mismatch direction.")
+                elif mismatch_30d >= 0.3:
+                    st.info(
+                        "Positive zone bias can support an under-set FTP hypothesis; "
+                        "it does not justify changing FTP by itself."
+                    )
+                elif mismatch_30d <= -0.3:
+                    st.info(
+                        "Negative zone bias can reflect an over-set FTP, fatigue, heat, "
+                        "or hydration; inspect recovery and sustained efforts."
+                    )
+                else:
+                    st.info("No strong average zone bias; this does not validate FTP.")
+
+            diagnostics = data.get("diagnostics", {})
+            st.subheader("Window diagnostics")
+            candidate_col, valid_col, rejected_col = st.columns(3)
+            candidate_col.metric(
+                "Candidate windows", diagnostics.get("candidate_windows", 0)
+            )
+            valid_col.metric("Valid windows", diagnostics.get("valid_windows", 0))
+            rejected_col.metric(
+                "Rejected windows", diagnostics.get("rejected_windows", 0)
+            )
+            reason_labels = {
+                "insufficient_samples": "Insufficient samples",
+                "missing_power": "Missing power coverage",
+                "missing_hr": "Missing HR coverage",
+                "missing_parameters": "Missing zone settings",
+            }
+            reason_data = [
+                {
+                    "Reason": label,
+                    "Windows": diagnostics.get("rejected_by_reason", {}).get(key, 0),
+                }
+                for key, label in reason_labels.items()
+            ]
+            quality_data = [
+                {"Quality (valid only)": level, "Windows": count}
+                for level, count in diagnostics.get("quality_counts", {}).items()
+            ]
+            diagnostic_col, quality_col = st.columns(2)
+            with diagnostic_col:
+                st.dataframe(reason_data, hide_index=True)
+                st.caption(
+                    "Coverage failures can overlap when a window lacks both sensors: "
+                    f"power {diagnostics.get('coverage_failures', {}).get('power', 0)}, "
+                    f"HR {diagnostics.get('coverage_failures', {}).get('hr', 0)}. "
+                    f"Inactive pause seconds: {diagnostics.get('inactive_seconds', 0)}; "
+                    f"uncovered seconds: {diagnostics.get('uncovered_seconds', 0)}."
+                )
+            with quality_col:
+                st.dataframe(quality_data, hide_index=True)
+                st.caption(
+                    "Quality is descriptive, not a validity filter. HIGH: CV ≤8%, "
+                    "zero power ≤5%, cadence >70 with ≥90% coverage, zone dominance ≥60%; "
+                    "LOW: CV >15%, zero power >10%, cadence ≤60, or zone dominance <50%. "
+                    "Zero power may be "
+                    "coasting or a sensor dropout; isolated zero samples are flagged."
+                )
+            with st.expander("Diagnostics by activity"):
+                st.dataframe(
+                    [
+                        {
+                            "Date": item["date"],
+                            "Activity": item["name"],
+                            "Candidates": item["candidate_windows"],
+                            "Valid": item["valid_windows"],
+                            "Rejected": item["rejected_windows"],
+                            "Active runs": item["active_runs"],
+                            "Inactive seconds": item["inactive_seconds"],
+                            "Uncovered seconds": item["uncovered_seconds"],
+                            "Reasons": ", ".join(
+                                f"{name}: {count}"
+                                for name, count in item["rejected_by_reason"].items()
+                                if count
+                            )
+                            or "None",
+                        }
+                        for item in data.get("diagnostics_by_activity", [])
+                    ],
+                    hide_index=True,
+                )
+            with st.expander("Recent valid-window quality details"):
+                st.caption(
+                    "Latest 100 valid windows; zero-power samples may be coasting or dropouts."
+                )
+                st.dataframe(
+                    [
+                        {
+                            "Date/time": point["timestamp"],
+                            "Quality": point["quality"],
+                            "Power CV %": point["power_cv_pct"],
+                            "Power CV % (nonzero)": point["power_cv_nonzero_pct"],
+                            "Zero-power %": point["zero_power_pct"],
+                            "Max zero run (s)": point["zero_power_max_run_s"],
+                            "Cadence (rpm)": point["avg_cadence_rpm"],
+                            "HR slope (bpm/min)": point["hr_slope_bpm_per_min"],
+                            "HR zone dominance %": point["hr_zone_dominance_pct"],
+                            "Power zone dominance %": point["power_zone_dominance_pct"],
+                        }
+                        for point in data.get("points", [])[-100:]
+                    ],
+                    hide_index=True,
+                )
+
+            matrix = _power_hr_mismatch_matrix(go, data)
+            if matrix is None:
+                st.info("No valid-window time available for the zone matrix.")
+            else:
+                st.plotly_chart(matrix, width="stretch")
+            st.caption(
+                "Matrix cells show valid sampled minutes (one represented minute per "
+                "accepted window), avoiding overlap double-counting. Zone boundaries come "
+                "from each activity's selected parameter settings."
+            )
+            with st.expander("Zone boundaries and analysis details"):
+                st.write("Heart-rate zones", data.get("hr_zones", []))
+                st.write("Power zones", data.get("power_zones", []))
+                st.json(data.get("criteria", {}))
             return
 
         if page == "Overview":

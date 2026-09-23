@@ -4,6 +4,7 @@ Exposes pure mathematical functions and typed structures for analyzing
 1Hz normalized cycling time-series samples.
 """
 
+from cycling.analytics.concordance import analyze_power_hr_windows
 from cycling.analytics.drift import aerobic_drift
 from cycling.analytics.durability import calculate_aerobic_durability, durability
 from cycling.analytics.load import calculate_session_load, training_load
@@ -69,6 +70,7 @@ __all__ = [
     "durability",
     "calculate_aerobic_durability",
     "aerobic_drift",
+    "analyze_power_hr_windows",
     "threshold_estimate",
     "training_load",
     # Specific Functions

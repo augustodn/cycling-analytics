@@ -521,6 +521,52 @@ class ServiceTests(unittest.TestCase):
             sum(week["hr_zone_seconds"]) + week["unclassified_seconds"],
         )
 
+    def test_power_hr_zone_mismatch_aggregates_valid_evidence_by_environment(self):
+        self.store.add_parameters(
+            AthleteParameters(effective_date=date(2026, 1, 2), ftp_w=260)
+        )
+        rows = [
+            {
+                "elapsed_s": second,
+                "segment": 0,
+                "active": True,
+                "power_w": 200,
+                "hr_bpm": 130,
+                "cadence_rpm": 90,
+            }
+            for second in range(1500)
+        ]
+        self.store.write_activity(
+            "outdoor-ride",
+            {
+                "start_time": "2026-01-02T00:00:00Z",
+                "elapsed_seconds": 1500,
+                "modality": "road",
+                "quality_flags": [],
+            },
+            rows,
+        )
+
+        result = self.service.power_hr_zone_mismatch("all", "outdoor")
+        data = result.data
+        self.assertEqual(result.operation, "power_hr_zone_mismatch")
+        self.assertEqual(data["valid_windows"], 18)
+        self.assertEqual(data["valid_seconds"], 1080)
+        self.assertEqual(data["diagnostics"]["candidate_windows"], 25)
+        self.assertEqual(data["diagnostics"]["rejected_windows"], 7)
+        self.assertEqual(
+            data["diagnostics"]["rejected_by_reason"]["insufficient_samples"], 7
+        )
+        self.assertEqual(data["mismatch_weighted"], 1)
+        self.assertEqual(data["hr_zone_2_power_zone_3_pct"], 100)
+        self.assertEqual(data["median_pw_hr_drift_pct"], 0)
+        self.assertEqual(data["best_observed_20m_w"], 200)
+        self.assertEqual(data["matrix_seconds"][1][2], 1080)
+        self.assertEqual(
+            self.service.power_hr_zone_mismatch("all", "indoor").data["valid_windows"],
+            0,
+        )
+
     def test_semantic_service_aliases(self):
         ident = self.ingest()
         req_act = ActivityRequest(activity_id=ident)

@@ -16,6 +16,8 @@ from cycling.dashboard import (
     _durability_plot_payload,
     _power_curve_figure,
     _power_curve_position,
+    _power_hr_mismatch_figure,
+    _power_hr_mismatch_matrix,
     _power_skills_figure,
     _render_hr_distribution,
     _weekly_training_figure,
@@ -26,6 +28,33 @@ from tests.test_parsers import tcx_text
 
 
 class DashboardTests(unittest.TestCase):
+    def test_zone_mismatch_charts_show_rolling_series_and_heatmap_minutes(self):
+        import plotly.graph_objects as go
+
+        data = {
+            "points": [
+                {
+                    "timestamp": "2026-01-01T00:10:00+00:00",
+                    "mismatch": 1,
+                    "mismatch_30d": 0.5,
+                    "representative_power_w": 200,
+                    "representative_hr_bpm": 130,
+                    "power_zone": 3,
+                    "hr_zone": 2,
+                }
+            ],
+            "matrix_seconds": [[0, 0, 0, 0, 0, 0], [0, 0, 60, 0, 0, 0]],
+            "power_zones": [{"label": f"Power Z{index}"} for index in range(1, 7)],
+            "hr_zones": [{"label": f"HR Z{index}"} for index in range(1, 6)],
+        }
+
+        mismatch = _power_hr_mismatch_figure(go, data)
+        matrix = _power_hr_mismatch_matrix(go, data)
+
+        self.assertEqual(mismatch.data[0].name, "Valid windows")
+        self.assertEqual(mismatch.data[1].name, "30-day rolling mean")
+        self.assertEqual(matrix.data[0].z[1][2], 1)
+
     def test_aerobic_durability_payload_contains_retention_and_efficiency(self):
         payload = _aerobic_durability_plot_payload(
             {
@@ -231,6 +260,10 @@ class DashboardTests(unittest.TestCase):
                     ingest(store, source)
 
                 app.run()
+                self.assertEqual(len(app.exception), 0)
+
+                # FTP calibration handles activities with no valid windows.
+                app.sidebar.selectbox[0].set_value("FTP Calibration").run()
                 self.assertEqual(len(app.exception), 0)
 
                 # Overview

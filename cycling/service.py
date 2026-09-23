@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime, timedelta
 from math import ceil
+from statistics import median
 from typing import Any
 
 from cycling import ALGORITHM_VERSION, analytics
@@ -480,6 +481,288 @@ class CyclingService:
                 "weeks": list(weekly.values()),
                 "zones": zone_definitions,
             },
+        )
+
+    def power_hr_zone_mismatch(
+        self,
+        period: str = "90d",
+        environment: str = "outdoor",
+        parameter_mode: str = "historical",
+    ):
+        """Compare valid power and HR zones without treating mismatch as FTP proof."""
+        if period not in (*PERIOD_DAYS, "all"):
+            raise ValueError(f"unsupported period: {period}")
+        if environment not in {"indoor", "outdoor"}:
+            raise ValueError("environment must be indoor or outdoor")
+        if parameter_mode not in {"historical", "current"}:
+            raise ValueError("parameter_mode must be historical or current")
+
+        cycling_modalities = {"indoor", "road", "mtb", "gravel"}
+        activities = [
+            activity
+            for activity in self.store.activities()
+            if activity.get("modality", "unknown") in cycling_modalities
+            and (
+                activity.get("modality") == "indoor"
+                if environment == "indoor"
+                else activity.get("modality") in {"road", "mtb", "gravel"}
+            )
+        ]
+        activities = _filter_period_activities(activities, "all", period)
+
+        points = []
+        drift_values = []
+        best_20m = None
+        best_60m = None
+        best_ftp_estimate = None
+        latest_ftp = None
+        latest_parameters = None
+        threshold_count = 0
+        used_activities = set()
+        diagnostics = {
+            "candidate_windows": 0,
+            "valid_windows": 0,
+            "rejected_windows": 0,
+            "rejected_by_reason": {
+                "insufficient_samples": 0,
+                "missing_power": 0,
+                "missing_hr": 0,
+                "missing_parameters": 0,
+            },
+            "coverage_failures": {"power": 0, "hr": 0},
+            "quality_counts": {"HIGH": 0, "MEDIUM": 0, "LOW": 0},
+            "active_runs": 0,
+            "inactive_seconds": 0,
+            "uncovered_seconds": 0,
+        }
+        diagnostics_by_activity = []
+        for activity in sorted(activities, key=lambda item: item["start_time"]):
+            request = ActivityRequest(
+                activity_id=activity["id"], parameter_mode=parameter_mode
+            )
+            _, _, parameters = self.settings(request)
+            if parameters is not None:
+                latest_parameters = parameters
+                latest_ftp = float(parameters.ftp_w)
+            samples = self.store.samples(activity["id"])
+            analysis = analytics.analyze_power_hr_windows(
+                samples,
+                parameters,
+                activity_id=activity["id"],
+                start_time=activity["start_time"],
+                modality=activity.get("modality", "unknown"),
+            )
+            activity_points = analysis["points"]
+            points.extend(activity_points)
+            if activity_points:
+                used_activities.add(activity["id"])
+            activity_diagnostics = analysis["diagnostics"]
+            diagnostics["candidate_windows"] += activity_diagnostics[
+                "candidate_windows"
+            ]
+            diagnostics["valid_windows"] += activity_diagnostics["valid_windows"]
+            diagnostics["rejected_windows"] += activity_diagnostics["rejected_windows"]
+            for reason, count in activity_diagnostics["rejected_by_reason"].items():
+                diagnostics["rejected_by_reason"][reason] += count
+            for sensor, count in activity_diagnostics["coverage_failures"].items():
+                diagnostics["coverage_failures"][sensor] += count
+            for level, count in activity_diagnostics["quality_counts"].items():
+                diagnostics["quality_counts"][level] += count
+            diagnostics["active_runs"] += activity_diagnostics["active_runs"]
+            diagnostics["inactive_seconds"] += activity_diagnostics["inactive_seconds"]
+            uncovered_seconds = int(activity.get("uncovered_seconds") or 0)
+            diagnostics["uncovered_seconds"] += uncovered_seconds
+            diagnostics_by_activity.append(
+                {
+                    "activity_id": activity["id"],
+                    "date": activity["start_time"][:10],
+                    "name": activity.get("source_name", activity["id"][:12]),
+                    "uncovered_seconds": uncovered_seconds,
+                    **activity_diagnostics,
+                }
+            )
+
+            drift = analytics.aerobic_drift(samples, parameters)
+            if drift.get("available") and drift.get("drift_percent") is not None:
+                drift_values.append(float(drift["drift_percent"]))
+
+            power_duration = analytics.power_curve(samples, [1200, 3600])
+            observed_20m = power_duration[1200]
+            observed_60m = power_duration[3600]
+            estimate = 0.95 * observed_20m if observed_20m is not None else None
+            if observed_20m is not None:
+                threshold_count += 1
+            if observed_20m is not None and (
+                best_20m is None or observed_20m > best_20m
+            ):
+                best_20m = float(observed_20m)
+            if estimate is not None and (
+                best_ftp_estimate is None or estimate > best_ftp_estimate
+            ):
+                best_ftp_estimate = float(estimate)
+            if observed_60m is not None and (
+                best_60m is None or observed_60m > best_60m
+            ):
+                best_60m = float(observed_60m)
+        points.sort(key=lambda point: point["timestamp"])
+        if latest_parameters is None:
+            _, latest_parameters = self.store.parameters(
+                None, mode="current" if parameter_mode == "current" else "historical"
+            )
+            if latest_parameters is not None:
+                latest_ftp = float(latest_parameters.ftp_w)
+        power_zone_count = max(
+            len(latest_parameters.power_zone_fractions) + 1 if latest_parameters else 1,
+            max((point["power_zone"] for point in points), default=1),
+        )
+        hr_zone_count = max(
+            len(latest_parameters.hr_zone_bounds) + 1 if latest_parameters else 1,
+            max((point["hr_zone"] for point in points), default=1),
+        )
+        matrix = [[0] * power_zone_count for _ in range(hr_zone_count)]
+        for point in points:
+            hr_zone, power_zone = point["hr_zone"], point["power_zone"]
+            matrix[hr_zone - 1][power_zone - 1] += point["represented_seconds"]
+
+        weight = sum(point["represented_seconds"] for point in points)
+        mismatch = (
+            sum(point["mismatch"] * point["represented_seconds"] for point in points)
+            / weight
+            if weight
+            else None
+        )
+        point_times = [datetime.fromisoformat(point["timestamp"]) for point in points]
+        if point_times:
+            latest_time = point_times[-1]
+            cutoff = latest_time - timedelta(days=30)
+            recent_points = [
+                point
+                for point, point_time in zip(points, point_times, strict=True)
+                if point_time >= cutoff
+            ]
+        else:
+            recent_points = []
+        recent_weight = sum(point["represented_seconds"] for point in recent_points)
+        mismatch_30d = (
+            sum(
+                point["mismatch"] * point["represented_seconds"]
+                for point in recent_points
+            )
+            / recent_weight
+            if recent_weight
+            else None
+        )
+
+        rolling_sum = rolling_weight = 0
+        left = 0
+        for index, point in enumerate(points):
+            point_time = point_times[index]
+            while left < index and point_times[left] < point_time - timedelta(days=30):
+                rolling_sum -= (
+                    points[left]["mismatch"] * points[left]["represented_seconds"]
+                )
+                rolling_weight -= points[left]["represented_seconds"]
+                left += 1
+            rolling_sum += point["mismatch"] * point["represented_seconds"]
+            rolling_weight += point["represented_seconds"]
+            point["mismatch_30d"] = rolling_sum / rolling_weight
+
+        power_zone_bounds = [
+            round(fraction * latest_ftp, 1) if latest_ftp else None
+            for fraction in (
+                latest_parameters.power_zone_fractions if latest_parameters else []
+            )
+        ]
+        hr_zone_bounds = list(
+            latest_parameters.hr_zone_bounds if latest_parameters else []
+        )
+
+        valid_seconds = weight
+        if valid_seconds >= 8 * 3600 and len(used_activities) >= 6:
+            data_confidence = "HIGH"
+        elif valid_seconds >= 3 * 3600 and len(used_activities) >= 3:
+            data_confidence = "MODERATE"
+        else:
+            data_confidence = "LOW"
+
+        return self.result(
+            "power_hr_zone_mismatch",
+            {
+                "period": period,
+                "environment": environment,
+                "parameter_mode": parameter_mode,
+                "window_s": 480,
+                "step_s": 60,
+                "criteria": {
+                    "power_and_hr_coverage_min_pct": 90,
+                    "power_representative": "5%-trimmed mean",
+                    "hr_representative": "median",
+                    "quality_does_not_reject_windows": True,
+                    "quality_high": "CV <=8%, zero power <=5%, cadence >70, zone dominance >=60%",
+                    "quality_low": "CV >15%, zero power >10%, cadence <=60, or zone dominance <50%",
+                },
+                "activities_evaluated": len(activities),
+                "activities_with_windows": len(used_activities),
+                "valid_windows": diagnostics["valid_windows"],
+                "valid_seconds": valid_seconds,
+                "diagnostics": diagnostics,
+                "diagnostics_by_activity": diagnostics_by_activity,
+                "mismatch_weighted": mismatch,
+                "mismatch_30d": mismatch_30d,
+                "hr_zone_2_power_zone_3_pct": (
+                    100
+                    * sum(
+                        point["represented_seconds"]
+                        for point in points
+                        if point["hr_zone"] == 2 and point["power_zone"] == 3
+                    )
+                    / weight
+                    if weight
+                    else None
+                ),
+                "median_pw_hr_drift_pct": median(drift_values)
+                if drift_values
+                else None,
+                "pw_hr_drift_activities": len(drift_values),
+                "declared_ftp_w": latest_ftp,
+                "best_observed_20m_w": best_20m,
+                "best_20m_ftp_estimate_w": best_ftp_estimate,
+                "threshold_evidence_activities": threshold_count,
+                "best_observed_60m_w": best_60m,
+                "data_confidence": data_confidence,
+                "data_confidence_criteria": {
+                    "moderate": "at least 3 sampled valid hours across 3 activities",
+                    "high": "at least 8 sampled valid hours across 6 activities",
+                    "otherwise": "low",
+                },
+                "matrix_seconds": matrix,
+                "hr_zones": [
+                    {
+                        "label": f"HR Z{index + 1}",
+                        "lower_bpm": hr_zone_bounds[index - 1]
+                        if index > 0 and index - 1 < len(hr_zone_bounds)
+                        else None,
+                        "upper_bpm": hr_zone_bounds[index]
+                        if index < len(hr_zone_bounds)
+                        else None,
+                    }
+                    for index in range(hr_zone_count)
+                ],
+                "power_zones": [
+                    {
+                        "label": f"Power Z{index + 1}",
+                        "lower_w": power_zone_bounds[index - 1]
+                        if index > 0 and index - 1 < len(power_zone_bounds)
+                        else None,
+                        "upper_w": power_zone_bounds[index]
+                        if index < len(power_zone_bounds)
+                        else None,
+                    }
+                    for index in range(power_zone_count)
+                ],
+                "points": points,
+            },
+            parameter_mode=parameter_mode,
         )
 
     def thresholds(self, request: ActivityRequest):
