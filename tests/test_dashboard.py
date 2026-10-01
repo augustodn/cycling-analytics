@@ -11,13 +11,19 @@ from streamlit.testing.v1 import AppTest
 
 from cycling.dashboard import (
     POWER_SKILL_DURATIONS,
+    POWER_SKILL_GROUPS,
     POWER_SKILL_INTERVALS,
+    POWER_SKILL_LEVELS,
     _aerobic_durability_plot_payload,
     _durability_plot_payload,
+    _estimate_power_skill_percentile,
     _power_curve_figure,
     _power_curve_position,
     _power_hr_mismatch_figure,
     _power_hr_mismatch_matrix,
+    _power_skill_assessments,
+    _power_skill_benchmark_table,
+    _power_skill_progress_figure,
     _power_skills_figure,
     _render_hr_distribution,
     _weekly_training_figure,
@@ -146,16 +152,94 @@ class DashboardTests(unittest.TestCase):
         chart = _power_skills_figure(go, historical, selected, "Selected period")
 
         labels = [label for _, label, _, _ in POWER_SKILL_INTERVALS]
-        colors = [color for _, _, _, color in POWER_SKILL_INTERVALS]
+        colors = [color for _, _, color in POWER_SKILL_GROUPS]
+        interval_angles = [index * 30 for index in range(len(labels))]
         self.assertEqual(len(POWER_SKILL_DURATIONS), 12)
-        self.assertEqual(list(chart.data[0].theta), labels)
-        self.assertEqual(list(chart.data[0].marker.color), colors)
-        self.assertEqual(chart.data[1].name, "All-time maximum")
-        self.assertEqual(chart.data[2].name, "Selected period")
-        self.assertIsNone(list(chart.data[2].r)[labels.index("3m")])
-        self.assertIn("0.25", chart.data[2].fillcolor)
-        self.assertEqual(chart.data[3].text[labels.index("3m")], "520 W")
-        self.assertEqual(list(chart.layout.polar.angularaxis.categoryarray), labels)
+        self.assertEqual(
+            [trace.name for trace in chart.data[:3]],
+            ["Sprinting (15s–1m)", "Attacking (2m–10m)", "Climbing (15m–60m)"],
+        )
+        self.assertEqual([trace.theta[0] for trace in chart.data[:3]], [30, 135, 270])
+        self.assertEqual([trace.width[0] for trace in chart.data[:3]], [86, 116, 146])
+        self.assertEqual([trace.marker.color[0] for trace in chart.data[:3]], colors)
+        self.assertTrue(all(trace.marker.line.width == 0 for trace in chart.data[:3]))
+        self.assertEqual(chart.data[3].name, "All-time maximum")
+        self.assertEqual(list(chart.data[3].theta), interval_angles)
+        self.assertEqual(chart.data[3].customdata[labels.index("3m")], "3m")
+        self.assertEqual(chart.data[4].name, "Selected period")
+        self.assertIsNone(list(chart.data[4].r)[labels.index("3m")])
+        self.assertIn("0.25", chart.data[4].fillcolor)
+        self.assertEqual(chart.data[5].text[labels.index("3m")], "520 W")
+        self.assertEqual(chart.layout.polar.angularaxis.type, "linear")
+        self.assertEqual(list(chart.layout.polar.angularaxis.tickvals), interval_angles)
+        self.assertEqual(list(chart.layout.polar.angularaxis.ticktext), labels)
+        self.assertEqual(chart.layout.legend.orientation, "v")
+
+    def test_power_skill_percentile_interpolates_reference_cutoffs(self):
+        self.assertEqual(_estimate_power_skill_percentile(0, 15), 0)
+        self.assertEqual(_estimate_power_skill_percentile(165, 15), 1)
+        self.assertEqual(_estimate_power_skill_percentile(252.5, 15), 16)
+        self.assertEqual(_estimate_power_skill_percentile(340, 15), 31)
+        self.assertEqual(_estimate_power_skill_percentile(1000, 15), 98)
+
+    def test_power_skill_assessments_average_available_interval_percentiles(self):
+        historical = {
+            "15": 340,
+            "30": 295,
+            "60": 260,
+            "120": 265,
+            "180": 245,
+            "300": 225,
+            "600": 205,
+            "900": 275,
+            "1200": 270,
+            "1800": 265,
+            "2700": 265,
+            "3600": 260,
+        }
+        historical.pop("60")
+
+        assessments = _power_skill_assessments(historical)
+
+        self.assertEqual(assessments[0]["percentile"], 31)
+        self.assertEqual(assessments[0]["level"], "Intermediate")
+        self.assertEqual(assessments[0]["level_number"], 2)
+        self.assertEqual(assessments[0]["intervals_available"], 2)
+        self.assertAlmostEqual(assessments[0]["progress"], (30 / 97) * 100)
+        self.assertEqual(assessments[1]["percentile"], 46)
+        self.assertEqual(assessments[1]["level"], "Athletic")
+        self.assertEqual(assessments[2]["percentile"], 85)
+        self.assertEqual(assessments[2]["level"], "Semi-Pro")
+
+    def test_power_skill_level_figure_and_reference_tables_show_current_values(self):
+        import plotly.graph_objects as go
+
+        assessments = _power_skill_assessments({"15": 340, "30": 295, "60": 260})
+        progress = _power_skill_progress_figure(go, assessments)
+        sprinting = _power_skill_benchmark_table(
+            "Sprinting", {"15": 400, "30": 300, "60": 250}
+        )
+        attacking = _power_skill_benchmark_table("Attacking", {"120": 443})
+        climbing = _power_skill_benchmark_table("Climbing", {"3600": 355})
+
+        self.assertEqual(list(progress.data[0].x), [100, 100, 100])
+        self.assertEqual(list(progress.data[1].x), [30 / 97 * 100, 0, 0])
+        self.assertEqual(progress.layout.barmode, "overlay")
+        self.assertEqual(len(progress.layout.shapes), len(POWER_SKILL_LEVELS) - 1)
+        self.assertEqual(len(sprinting), 3)
+        self.assertEqual(sprinting[0]["Interval"], "15s")
+        self.assertEqual(sprinting[0]["Aspiring P1"], "165 W")
+        self.assertEqual(sprinting[0]["Intermediate P31"], "340 W")
+        self.assertEqual(sprinting[0]["World Class P98"], "930 W")
+        self.assertEqual(sprinting[0]["Current best (W)"], "400 W")
+        self.assertEqual(sprinting[-1]["Current best (W)"], "250 W")
+        self.assertEqual(len(attacking), 4)
+        self.assertEqual(attacking[0]["Interval"], "2m")
+        self.assertEqual(attacking[0]["Current best (W)"], "443 W")
+        self.assertEqual(attacking[1]["Current best (W)"], "—")
+        self.assertEqual(len(climbing), 5)
+        self.assertEqual(climbing[-1]["Interval"], "60m")
+        self.assertEqual(climbing[-1]["Current best (W)"], "355 W")
 
     def test_weekly_training_figure_uses_requested_hr_zone_colors(self):
         import plotly.graph_objects as go

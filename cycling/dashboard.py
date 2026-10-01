@@ -57,6 +57,30 @@ POWER_SKILL_GROUPS = (
         "#EF783A",
     ),
 )
+POWER_SKILL_LEVELS = (
+    ("Aspiring", 1),
+    ("Intermediate", 31),
+    ("Athletic", 46),
+    ("Sport", 56),
+    ("Elite", 71),
+    ("Semi-Pro", 85),
+    ("National Star", 94),
+    ("World Class", 98),
+)
+POWER_SKILL_REFERENCE_WATTS = {
+    15: (165, 340, 395, 440, 515, 620, 765, 930),
+    30: (155, 295, 345, 375, 435, 515, 625, 745),
+    60: (145, 260, 295, 320, 365, 430, 510, 600),
+    120: (130, 230, 265, 285, 325, 375, 440, 520),
+    180: (125, 215, 245, 265, 300, 345, 405, 475),
+    300: (115, 200, 225, 240, 270, 315, 365, 425),
+    600: (105, 180, 205, 220, 250, 285, 335, 385),
+    900: (105, 175, 200, 215, 240, 275, 320, 375),
+    1200: (100, 175, 195, 210, 235, 270, 315, 365),
+    1800: (100, 170, 190, 205, 230, 265, 310, 360),
+    2700: (100, 170, 190, 205, 230, 265, 305, 355),
+    3600: (100, 165, 190, 200, 225, 260, 305, 355),
+}
 POWER_SKILL_INTERVALS = tuple(
     (duration, label, skill, color)
     for skill, intervals, color in POWER_SKILL_GROUPS
@@ -237,7 +261,21 @@ def _power_skills_figure(
 ):
     labels = [label for _, label, _, _ in POWER_SKILL_INTERVALS]
     durations = [duration for duration, _, _, _ in POWER_SKILL_INTERVALS]
-    group_colors = [color for _, _, _, color in POWER_SKILL_INTERVALS]
+    degrees_per_interval = 360 / len(labels)
+    sector_angles = []
+    sector_widths = []
+    sector_colors = []
+    sector_start = 0
+    for _, intervals, color in POWER_SKILL_GROUPS:
+        interval_count = len(intervals)
+        sector_angles.append(
+            (sector_start + (interval_count - 1) / 2) * degrees_per_interval
+        )
+        sector_widths.append(interval_count * degrees_per_interval - 4)
+        sector_colors.append(color)
+        sector_start += interval_count
+
+    interval_angles = [index * degrees_per_interval for index in range(len(labels))]
     history = [historical_watts.get(str(duration)) for duration in durations]
     selected = [selected_watts.get(str(duration)) for duration in durations]
     available = [value for value in (*history, *selected) if value is not None]
@@ -250,50 +288,52 @@ def _power_skills_figure(
 
     ring_base = max_watts * 1.08
     ring_width = max_watts * 0.12
-    figure = go.Figure(
-        go.Barpolar(
-            r=[ring_width] * len(labels),
-            theta=labels,
-            width=[360 / len(labels)] * len(labels),
-            base=[ring_base] * len(labels),
-            marker_color=group_colors,
-            marker_line_color="white",
-            marker_line_width=1,
-            hoverinfo="skip",
-            showlegend=False,
-            name="Power skill groups",
+    figure = go.Figure()
+    for index, (skill, intervals, _) in enumerate(POWER_SKILL_GROUPS):
+        figure.add_trace(
+            go.Barpolar(
+                r=[ring_width],
+                theta=[sector_angles[index]],
+                width=[sector_widths[index]],
+                base=[ring_base],
+                marker_color=[sector_colors[index]],
+                marker_line_width=0,
+                hoverinfo="skip",
+                name=f"{skill} ({intervals[0][1]}–{intervals[-1][1]})",
+            )
         )
-    )
     figure.add_trace(
         go.Scatterpolar(
             r=history,
-            theta=labels,
+            theta=interval_angles,
+            customdata=labels,
             mode="lines+markers",
             fill="toself",
             fillcolor="rgba(126, 68, 165, 0.62)",
             line={"color": "#7E44A5", "width": 2},
             connectgaps=False,
             name="All-time maximum",
-            hovertemplate="%{theta}: %{r:.0f} W<extra>%{fullData.name}</extra>",
+            hovertemplate="%{customdata}: %{r:.0f} W<extra>%{fullData.name}</extra>",
         )
     )
     figure.add_trace(
         go.Scatterpolar(
             r=selected,
-            theta=labels,
+            theta=interval_angles,
+            customdata=labels,
             mode="lines+markers",
             fill="toself",
             fillcolor="rgba(40, 150, 220, 0.25)",
             line={"color": "#2896DC", "width": 2},
             connectgaps=False,
             name=selected_label,
-            hovertemplate="%{theta}: %{r:.0f} W<extra>%{fullData.name}</extra>",
+            hovertemplate="%{customdata}: %{r:.0f} W<extra>%{fullData.name}</extra>",
         )
     )
     figure.add_trace(
         go.Scatterpolar(
             r=[max_watts * 1.29 if value is not None else None for value in history],
-            theta=labels,
+            theta=interval_angles,
             text=[
                 f"{float(value):.0f} W" if value is not None else ""
                 for value in history
@@ -308,7 +348,14 @@ def _power_skills_figure(
     figure.update_layout(
         title="Power Skills — Best Power by Interval",
         height=680,
-        legend={"orientation": "h", "y": -0.12},
+        legend={
+            "orientation": "v",
+            "x": 1.03,
+            "xanchor": "left",
+            "y": 1,
+            "yanchor": "top",
+        },
+        margin={"l": 35, "r": 185, "t": 55, "b": 45},
         polar={
             "radialaxis": {
                 "visible": True,
@@ -317,8 +364,10 @@ def _power_skills_figure(
                 "gridcolor": "rgba(128, 128, 128, 0.35)",
             },
             "angularaxis": {
-                "categoryorder": "array",
-                "categoryarray": labels,
+                "type": "linear",
+                "tickmode": "array",
+                "tickvals": interval_angles,
+                "ticktext": labels,
                 "direction": "clockwise",
                 "rotation": 90,
             },
@@ -327,19 +376,168 @@ def _power_skills_figure(
     return figure
 
 
+def _estimate_power_skill_percentile(watts: float, duration_s: int) -> float:
+    references = POWER_SKILL_REFERENCE_WATTS[duration_s]
+    if watts <= 0:
+        return 0.0
+    if watts < references[0]:
+        return watts / references[0]
+
+    for index in range(1, len(references)):
+        if watts <= references[index]:
+            lower_watts, upper_watts = references[index - 1 : index + 1]
+            lower_percentile = POWER_SKILL_LEVELS[index - 1][1]
+            upper_percentile = POWER_SKILL_LEVELS[index][1]
+            fraction = (watts - lower_watts) / (upper_watts - lower_watts)
+            return lower_percentile + fraction * (upper_percentile - lower_percentile)
+    return float(POWER_SKILL_LEVELS[-1][1])
+
+
+def _power_skill_assessments(historical_watts: dict) -> list[dict]:
+    assessments = []
+    for skill, intervals, color in POWER_SKILL_GROUPS:
+        percentiles = [
+            _estimate_power_skill_percentile(float(watts), duration)
+            for duration, _ in intervals
+            if (watts := historical_watts.get(str(duration))) is not None
+        ]
+        percentile = sum(percentiles) / len(percentiles) if percentiles else None
+        level, level_number = "Below Aspiring", 0
+        if percentile is not None:
+            for index, (name, cutoff) in enumerate(POWER_SKILL_LEVELS, start=1):
+                if percentile >= cutoff:
+                    level, level_number = name, index
+
+        progress = (
+            0.0
+            if percentile is None
+            else max(0.0, min(100.0, (percentile - 1) / (98 - 1) * 100))
+        )
+        assessments.append(
+            {
+                "skill": skill,
+                "color": color,
+                "percentile": percentile,
+                "level": level,
+                "level_number": level_number,
+                "progress": progress,
+                "intervals_available": len(percentiles),
+                "intervals_total": len(intervals),
+            }
+        )
+    return assessments
+
+
+def _power_skill_progress_figure(go, assessments: list[dict]):
+    figure = go.Figure()
+    skills = [item["skill"] for item in assessments]
+    figure.add_bar(
+        x=[100] * len(assessments),
+        y=skills,
+        orientation="h",
+        marker_color="rgba(128, 128, 128, 0.3)",
+        hoverinfo="skip",
+        showlegend=False,
+        name="P1 to P98 range",
+    )
+    figure.add_bar(
+        x=[item["progress"] for item in assessments],
+        y=skills,
+        orientation="h",
+        marker_color=[item["color"] for item in assessments],
+        customdata=[
+            [
+                item["level"],
+                item["level_number"],
+                item["percentile"] if item["percentile"] is not None else 0,
+                item["intervals_available"],
+                item["intervals_total"],
+            ]
+            for item in assessments
+        ],
+        hovertemplate=(
+            "%{y}: %{customdata[0]} · Level %{customdata[1]}"
+            " · P%{customdata[2]:.1f}<br>"
+            "%{customdata[3]}/%{customdata[4]} intervals<extra></extra>"
+        ),
+        showlegend=False,
+        name="Estimated progress",
+    )
+
+    for _, percentile in POWER_SKILL_LEVELS[1:]:
+        position = (percentile - 1) / (98 - 1) * 100
+        figure.add_vline(
+            x=position,
+            line_color="rgba(128, 128, 128, 0.8)",
+            line_width=1,
+        )
+
+    for item in assessments:
+        if item["percentile"] is None:
+            text = "No data"
+        else:
+            rank = "<P1" if item["percentile"] < 1 else f"P{item['percentile']:.0f}"
+            text = (
+                f"{item['level']} · Level {item['level_number']} · {rank} · "
+                f"{item['progress']:.0f}% "
+                f"({item['intervals_available']}/{item['intervals_total']})"
+            )
+        figure.add_annotation(
+            x=102,
+            y=item["skill"],
+            xref="x",
+            yref="y",
+            text=text,
+            showarrow=False,
+            xanchor="left",
+            align="left",
+        )
+
+    figure.update_layout(
+        title="Estimated skill level",
+        barmode="overlay",
+        height=260,
+        margin={"l": 100, "r": 15, "t": 45, "b": 15},
+        xaxis={"range": [0, 160], "visible": False, "fixedrange": True},
+        yaxis={
+            "categoryorder": "array",
+            "categoryarray": skills,
+            "autorange": "reversed",
+            "fixedrange": True,
+        },
+    )
+    return figure
+
+
+def _power_skill_benchmark_table(skill: str, current_watts: dict) -> list[dict]:
+    _, intervals, _ = next(group for group in POWER_SKILL_GROUPS if group[0] == skill)
+    rows = []
+    for duration, label in intervals:
+        row = {"Interval": label}
+        row.update(
+            {
+                f"{name} P{percentile}": f"{POWER_SKILL_REFERENCE_WATTS[duration][index]} W"
+                for index, (name, percentile) in enumerate(POWER_SKILL_LEVELS)
+            }
+        )
+        watts = current_watts.get(str(duration))
+        row["Current best (W)"] = f"{float(watts):.0f} W" if watts is not None else "—"
+        rows.append(row)
+    return rows
+
+
 def _render_power_skills(
     st, go, historical_data: dict, selected_data: dict, selected_label: str
 ) -> None:
     st.subheader("Power Skills")
     st.caption(
-        "Intervals: Sprinting 15s–1m (blue), Attacking 2–10m (green), and Climbing "
-        "15–60m (orange). Solid fill: all-time maximum; translucent fill: selection. "
-        "All-time reference uses the same modality. Values are watts; Strava's personalized "
-        "milestone thresholds are not public."
+        "The ring legend identifies Sprinting (15s–1m), Attacking (2–10m), and "
+        "Climbing (15–60m). Solid fill: all-time maximum; translucent fill: selection."
     )
+    historical_watts = historical_data.get("watts", {})
     figure = _power_skills_figure(
         go,
-        historical_data.get("watts", {}),
+        historical_watts,
         selected_data.get("watts", {}),
         selected_label,
     )
@@ -347,6 +545,24 @@ def _render_power_skills(
         st.info("No valid power efforts are available for the Power Skills intervals.")
         return
     st.plotly_chart(figure, width="stretch")
+
+    assessments = _power_skill_assessments(historical_watts)
+    st.plotly_chart(_power_skill_progress_figure(go, assessments), width="stretch")
+    st.caption(
+        "Each available all-time duration contributes equally; missing intervals are "
+        "omitted. Percentiles interpolate between your cutoffs and cap at P98. The fill "
+        "maps P1 to 0% and P98 to 100%; levels are estimates, not official Strava ratings."
+    )
+    st.subheader("Reference levels and current values")
+    st.caption(f"Current best values use the selected scope: {selected_label}.")
+    current_watts = selected_data.get("watts", {})
+    for skill, _, _ in POWER_SKILL_GROUPS:
+        st.markdown(f"#### {skill}")
+        st.dataframe(
+            _power_skill_benchmark_table(skill, current_watts),
+            width="stretch",
+            hide_index=True,
+        )
 
 
 def _weekly_training_figure(go, data: dict):
