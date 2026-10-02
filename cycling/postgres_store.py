@@ -25,6 +25,14 @@ from cycling.models import ActivityContext, AthleteParameters
 from cycling.normalization import normalize
 from cycling.parsers import FIELDS, parse_file
 
+_ACTIVITY_SELECT = (
+    "SELECT a.*, c.id AS context_id, c.context, ARRAY(SELECT flag FROM cycling_quality_flags "
+    "WHERE user_id=%s AND activity_id=a.id ORDER BY flag) AS quality_flags "
+    "FROM cycling_activities a LEFT JOIN LATERAL (SELECT id,context FROM cycling_activity_context "
+    "WHERE user_id=%s AND activity_id=a.id ORDER BY recorded_at DESC,id DESC LIMIT 1) c ON true "
+    "WHERE a.user_id=%s"
+)
+
 
 def _user_id(value):
     if not isinstance(value, str) or not value.strip() or value != value.strip():
@@ -318,19 +326,18 @@ class PostgresStore:
 
     def activity(self, ident: str):
         row = self.db.execute(
-            "SELECT a.*, c.id AS context_id, c.context, ARRAY(SELECT flag FROM cycling_quality_flags "
-            "WHERE user_id=%s AND activity_id=a.id ORDER BY flag) AS quality_flags "
-            "FROM cycling_activities a LEFT JOIN LATERAL (SELECT id,context FROM cycling_activity_context "
-            "WHERE user_id=%s AND activity_id=a.id ORDER BY recorded_at DESC,id DESC LIMIT 1) c ON true "
-            "WHERE a.user_id=%s AND a.id=%s",
+            _ACTIVITY_SELECT + " AND a.id=%s",
             (self.user_id, self.user_id, self.user_id, ident),
         ).fetchone()
         if row is None:
             raise KeyError(f"Activity not found: {ident}")
+        return self._hydrate_activity(row)
+
+    def _hydrate_activity(self, row):
         context = row.pop("context") or {}
         metadata = row.pop("metadata")
         row.pop("user_id")
-        self._sample_paths[ident] = row["sample_path"]
+        self._sample_paths[row["id"]] = row["sample_path"]
         # Untrusted metadata must not override ownership, IDs or storage references.
         return {
             **metadata,
@@ -341,10 +348,10 @@ class PostgresStore:
 
     def activities(self):
         rows = self.db.execute(
-            "SELECT id FROM cycling_activities WHERE user_id=%s ORDER BY start_time DESC, id",
-            (self.user_id,),
+            _ACTIVITY_SELECT + " ORDER BY a.start_time DESC, a.id",
+            (self.user_id, self.user_id, self.user_id),
         ).fetchall()
-        return [self.activity(r["id"]) for r in rows]
+        return [self._hydrate_activity(row) for row in rows]
 
     def set_context(self, ident: str, context: ActivityContext):
         with self.db.transaction():

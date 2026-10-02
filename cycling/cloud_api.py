@@ -1,11 +1,22 @@
 """Authenticated FastAPI adapter for the Vercel deployment."""
 
+import json
 import os
 from datetime import UTC, date, datetime
+from time import perf_counter
 from typing import Annotated, Iterator
 
 import jwt
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -70,6 +81,7 @@ def authenticated_user(
 
 
 def request_store(
+    request: Request,
     user_id: Annotated[str, Depends(authenticated_user)],
 ) -> Iterator[PostgresStore]:
     database_url = os.environ.get("DATABASE_URL")
@@ -78,12 +90,15 @@ def request_store(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database is not configured",
         )
+    started = perf_counter()
     try:
         store = PostgresStore(database_url, user_id)
     except PermissionError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="User is not active"
         ) from exc
+    finally:
+        request.state.store_init_ms = (perf_counter() - started) * 1000
     try:
         yield store
     finally:
@@ -93,6 +108,36 @@ def request_store(
 StoreDep = Annotated[PostgresStore, Depends(request_store)]
 
 app = FastAPI(title="Cycling analytics API", version="1")
+
+
+@app.middleware("http")
+async def request_timing(request: Request, call_next):
+    """Time response generation, not body transmission or dependency cleanup."""
+    started = perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    finally:
+        elapsed_ms = (perf_counter() - started) * 1000
+        store_init_ms = getattr(request.state, "store_init_ms", None)
+        event = {
+            "event": "request_timing",
+            "method": request.method,
+            # Never log raw paths, queries, headers, bodies or exception text.
+            "path": getattr(request.scope.get("route"), "path", "<unmatched>"),
+            "status": status_code,
+            "elapsed_ms": round(elapsed_ms, 2),
+        }
+        if store_init_ms is not None:
+            event["store_init_ms"] = round(store_init_ms, 2)
+        # stdout is captured by Vercel without changing global logging config.
+        print(json.dumps(event, separators=(",", ":")), flush=True)
+    timing = f"app;dur={elapsed_ms:.2f}"
+    if store_init_ms is not None:
+        timing += f", store_init;dur={store_init_ms:.2f}"
+    response.headers.append("Server-Timing", timing)
+    return response
 
 
 @app.get("/api/v1/health")

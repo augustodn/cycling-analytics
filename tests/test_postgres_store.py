@@ -20,7 +20,7 @@ import hashlib
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
@@ -30,7 +30,13 @@ import pytest
 
 from cycling.ingestion import ingest
 from cycling.migrations import apply_migrations
-from cycling.models import ActivityContext, ActivityRequest, AthleteParameters
+from cycling.models import (
+    ActivityContext,
+    ActivityRequest,
+    AthleteParameters,
+    LoadRequest,
+    PeriodPowerCurveRequest,
+)
 from cycling.postgres_store import PostgresStore, _ObjectStore
 from cycling.service import CyclingService
 from cycling.storage import Store
@@ -147,6 +153,44 @@ def test_private_blob_sdk_contract(monkeypatch, tmp_path):
     assert not (tmp_path / "forbidden").exists()
 
 
+@pytest.mark.parametrize("count", [0, 1, 20])
+def test_catalog_hydration_uses_one_owner_scoped_query_and_pins_paths(count):
+    store = PostgresStore.__new__(PostgresStore)
+    store.user_id = "alice"
+    store._sample_paths = {}
+    store.db = Mock()
+    store.db.execute.return_value.fetchall.return_value = [
+        {
+            "id": str(index),
+            "user_id": "alice",
+            "sample_path": f"revision-{index}",
+            "ingested_at": datetime(2026, 1, 1, tzinfo=UTC),
+            "metadata": {"id": "forged", "sample_path": "forged", "rpe": 1},
+            "context_id": f"context-{index}",
+            "context": {"rpe": 5} if index else None,
+            "quality_flags": ["a", "z"],
+        }
+        for index in range(count)
+    ]
+    activities = store.activities()
+    store.db.execute.assert_called_once()
+    sql, owners = store.db.execute.call_args.args
+    assert owners == ("alice", "alice", "alice")
+    assert sql.count("user_id=%s") == 3
+    assert sql.endswith("ORDER BY a.start_time DESC, a.id")
+    assert [a["id"] for a in activities] == [str(index) for index in range(count)]
+    assert store._sample_paths == {
+        str(index): f"revision-{index}" for index in range(count)
+    }
+    for index, activity in enumerate(activities):
+        assert activity["sample_path"] == f"revision-{index}"
+        assert activity["ingested_at"] == "2026-01-01T00:00:00+00:00"
+        assert activity["rpe"] == (5 if index else 1)
+        assert activity["context_id"] == f"context-{index}"
+        assert activity["quality_flags"] == ["a", "z"]
+        assert "user_id" not in activity
+
+
 @pytest.fixture
 def stores(tmp_path):
     database_url = os.environ.get("TEST_DATABASE_URL")
@@ -256,6 +300,36 @@ def test_duplicate_blob_upload_is_removed_after_owner_scoped_dedupe(stores):
     assert store.status()["activities"] == 1
 
 
+def test_overview_keeps_warm_load_cache_blob_reads_and_latest_curve_anchor(
+    stores, monkeypatch
+):
+    store = stores("alice")
+    ident = upload(store)["activity_id"]
+    store.add_parameters(AthleteParameters(ftp_w=250))
+    service = CyclingService(store)
+    service.analyze_activity(ActivityRequest(activity_id=ident))
+    sample_reads = Mock(wraps=store.samples)
+    monkeypatch.setattr(store, "samples", sample_reads)
+    result = service.load(
+        LoadRequest(start=date(2026, 1, 1), end=date(2026, 1, 2), modality="all")
+    )
+    assert result.data["activities"][0]["activity_id"] == ident
+    sample_reads.assert_not_called()
+    service.weekly_cycling_training(date(2026, 1, 2))
+    sample_reads.assert_called_once_with(ident)
+    sample_reads.reset_mock()
+    curve = service.period_power_curve(
+        PeriodPowerCurveRequest(period="90d", modality="all", durations=[1])
+    )
+    assert curve.data["activities_evaluated"] == 1
+    assert curve.data["watts"]["1"] is not None
+    sample_reads.assert_called_once_with(ident)
+    outside = service.period_power_curve(
+        PeriodPowerCurveRequest(period="90d", end_date=date(2035, 1, 1))
+    )
+    assert outside.data["activities_evaluated"] == 0
+
+
 def test_every_public_lookup_and_write_is_owner_scoped(stores):
     alice, bob = stores("alice"), stores("bob")
     ident = upload(alice)["activity_id"]
@@ -286,6 +360,62 @@ def test_every_public_lookup_and_write_is_owner_scoped(stores):
     # Values that look like SQL are still values.
     with pytest.raises(KeyError):
         bob.activity("' OR 1=1 --")
+
+
+def test_batch_catalog_matches_single_reads_order_overlays_and_sample_revisions(
+    stores, monkeypatch
+):
+    alice, bob = stores("alice"), stores("bob")
+    original_id = upload(alice)["activity_id"]
+    original, samples = alice.activity(original_id), alice.samples(original_id)
+    for ident, start in [
+        (original_id, "2026-01-01T00:00:00+00:00"),
+        ("a", "2026-01-03T00:00:00+00:00"),
+        ("b", "2026-01-03T00:00:00+00:00"),
+    ]:
+        alice.write_activity(
+            ident,
+            {
+                **original,
+                "source_hash": ident,
+                "start_time": start,
+                "quality_flags": ["z-flag", "a-flag"],
+                "id": "forged",
+                "sample_path": "forged",
+                "rpe": 1,
+            },
+            samples,
+        )
+    recorded = datetime(2026, 2, 1, tzinfo=UTC)
+    alice.import_context("a", "context-a", recorded, {"rpe": 3, "modality": "road"})
+    alice.import_context("a", "context-z", recorded, {"rpe": 6, "modality": "mtb"})
+    bob.write_activity(
+        "a", {**original, "source_hash": "a", "quality_flags": ["bob-only"]}, samples
+    )
+    bob.import_context("a", "context-z", recorded, {"rpe": 9, "modality": "gravel"})
+    expected = [alice.activity(ident) for ident in ("a", "b", original_id)]
+    alice._sample_paths.clear()
+    db, objects = Mock(wraps=alice.db), Mock(wraps=alice.objects)
+    with monkeypatch.context() as patch:
+        patch.setattr(alice, "db", db)
+        patch.setattr(alice, "objects", objects)
+        activities = alice.activities()
+        db.execute.assert_called_once()
+        objects.read.assert_not_called()
+    assert activities == expected
+    assert activities[0]["context_id"] == "context-z"
+    assert activities[0]["rpe"] == 6
+    assert activities[0]["modality"] == "mtb"
+    assert activities[0]["quality_flags"] == ["a-flag", "z-flag"]
+    assert bob.activities()[0]["rpe"] == 9
+    assert bob.activities()[0]["quality_flags"] == ["bob-only"]
+    assert alice._sample_paths == {a["id"]: a["sample_path"] for a in activities}
+    writer = stores("alice")
+    changed = [{**s, "power_w": 350.0} for s in samples]
+    writer.write_activity("a", activities[0], changed)
+    assert alice.samples("a") == samples  # Listing pinned the original revision.
+    assert alice.activity("a")["sample_path"] != activities[0]["sample_path"]
+    assert alice.samples("a") == changed
 
 
 def test_disabled_accounts_cannot_open_a_tenant_store(stores):
