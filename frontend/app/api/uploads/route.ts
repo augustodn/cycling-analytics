@@ -43,6 +43,8 @@ export async function POST(request: Request) {
         return {
           allowedContentTypes: [
             "application/octet-stream",
+            "application/fits",
+            "application/vnd.ant.fit",
             "application/xml",
             "text/xml",
             "application/gzip",

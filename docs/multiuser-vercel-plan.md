@@ -128,3 +128,4 @@ Vercel Function limits. If not, move ingestion to a durable worker.
 | 2026-10-02 | Final validation: 75 legacy unittests, 29 PostgreSQL/API/analytics integration tests, Ruff, Next build/lint, local and remote Vercel builds. Remote health returns 200; unauthenticated tenant API returns 401. Browser upload callback, friends' invites, workload benchmark and full visual parity remain. |
 | 2026-10-02 | Changed the Next build script to `next build --webpack` after repeatable local Turbopack trace cancellations; local Next build, lint and Vercel build now pass. |
 | 2026-10-02 | Added visible Upload FIT/TCX navigation and Overview links after owner couldn't find the upload page; production redeployed. |
+| 2026-10-02 | Added FIT MIME types `application/fits` and `application/vnd.ant.fit` after the browser upload returned a Vercel Blob content-type mismatch. |
