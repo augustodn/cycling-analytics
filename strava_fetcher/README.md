@@ -10,7 +10,7 @@ Run these commands from the repository root:
 ```bash
 uv python install 3.13
 uv sync
-uv run playwright install chromium
+uv run --group local playwright install chromium
 ```
 
 If `uv` is not installed, follow the [official installation instructions](https://docs.astral.sh/uv/getting-started/installation/).
@@ -26,7 +26,7 @@ After completing one of the login setups below, start with a small dry run.
 This discovers activity IDs but downloads nothing.
 
 ```bash
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222 \
   --dry-run --limit 10
 ```
@@ -55,7 +55,7 @@ Log in to Strava normally in that Chrome window. Keep it open, then run the
 downloader from another terminal:
 
 ```bash
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222 \
   --dry-run --limit 10
 ```
@@ -74,7 +74,7 @@ normal Strava account in it.
 Download a small batch first:
 
 ```bash
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222 \
   --limit 10
 ```
@@ -82,7 +82,7 @@ uv run python strava_fetcher/download.py \
 When that works, download all discovered activities:
 
 ```bash
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222
 ```
 
@@ -104,7 +104,7 @@ Whitespace and filesystem-invalid characters in titles are replaced with `_`.
 To keep original TCX files too, add `--include-tcx`:
 
 ```bash
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222 \
   --include-tcx
 ```
@@ -144,7 +144,7 @@ downloads/strava/.state.json
 Example:
 
 ```bash
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222 \
   --limit 25 \
   --sport Ride \
@@ -156,7 +156,7 @@ To download regular and virtual rides from January through the current
 activity list:
 
 ```bash
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222 \
   --sport Ride \
   --sport VirtualRide \
@@ -173,7 +173,7 @@ across five pages instead of stopping at 20.
 To download the next 90 older activities, use an offset:
 
 ```bash
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222 \
   --offset 90 --limit 90
 ```
@@ -197,7 +197,7 @@ google-chrome-stable \
   --remote-debugging-port=9222 \
   --user-data-dir="$PWD/.strava-chrome"
 
-uv run python strava_fetcher/download.py \
+uv run --group local python strava_fetcher/download.py \
   --cdp-url http://127.0.0.1:9222 \
   --dry-run --limit 10
 ```

@@ -7,3 +7,11 @@ __pycache__/
 .cycling/
 .ruff_cache/
 .agents/
+.env
+.env.*
+node_modules/
+.next/
+.vercel/
+.vercel
+.env*
+!.env.example

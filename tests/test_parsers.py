@@ -1,14 +1,17 @@
 """Synthetic public fixtures only; no Strava account or private downloads."""
 
+import gzip
 import struct
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from fitdecode import FitCRCError
 from fitdecode.utils import compute_crc
 
+from cycling import parsers
 from cycling.normalization import normalize
 from cycling.parsers import parse_file
 from cycling.storage import Store
@@ -94,6 +97,14 @@ def fit_bytes():
 
 
 class ParserTests(unittest.TestCase):
+    def test_gzip_decompression_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "compressed.tcx.gz"
+            path.write_bytes(gzip.compress(b"x" * 65))
+            with patch.object(parsers, "MAX_SOURCE_BYTES", 64):
+                with self.assertRaisesRegex(ValueError, "Decompressed source exceeds"):
+                    parse_file(path)
+
     def test_zwift_and_mywhoosh_source_names_classify_as_indoor(self):
         with tempfile.TemporaryDirectory() as directory:
             for platform in ("Zwift", "MyWhoosh"):

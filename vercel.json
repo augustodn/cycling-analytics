@@ -1,0 +1,36 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "frontend": {
+      "root": "frontend/",
+      "framework": "nextjs",
+      "functions": {
+        "app/**/*.ts": { "regions": ["gru1"] },
+        "app/**/*.tsx": { "regions": ["gru1"] }
+      },
+      "bindings": [
+        {
+          "type": "service",
+          "service": "cycling-api",
+          "format": "url",
+          "env": "CYCLING_API_URL"
+        }
+      ]
+    },
+    "cycling-api": {
+      "root": "backend/",
+      "framework": "fastapi",
+      "entrypoint": "cycling.cloud_api:app",
+      "functions": {
+        "cycling/cloud_api.py": {
+          "excludeFiles": "{tests/**,docs/**,downloads/**,.cycling/**,.venv/**,.vercel/**,node_modules/**,strava_fetcher/**,scripts/**}",
+          "regions": ["gru1"]
+        }
+      }
+    }
+  },
+  "rewrites": [
+    { "source": "/api/v1/(.*)", "destination": { "service": "cycling-api" } },
+    { "source": "/(.*)", "destination": { "service": "frontend" } }
+  ]
+}

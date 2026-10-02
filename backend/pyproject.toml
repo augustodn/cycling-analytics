@@ -1,0 +1,18 @@
+[project]
+name = "cycling-analytics-api"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fitdecode>=0.11,<0.12",
+    "pyarrow>=20,<24",
+    "pydantic>=2.11,<3",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+    "psycopg[binary]>=3.2,<4",
+    "vercel==0.11.4",
+    "pyjwt>=2.10,<3",
+    "python-multipart>=0.0.20,<1",
+]
+
+[tool.vercel]
+entrypoint = "cycling.cloud_api:app"

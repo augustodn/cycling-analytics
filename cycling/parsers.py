@@ -17,6 +17,7 @@ FIELDS = (
     "latitude",
     "longitude",
 )
+MAX_SOURCE_BYTES = 64 * 1024 * 1024
 
 
 def _utc(value):
@@ -77,9 +78,16 @@ def _fit_coordinate(value):
 
 
 def _read_bytes(path: Path) -> bytes:
+    if path.stat().st_size > MAX_SOURCE_BYTES:
+        raise ValueError(f"Source exceeds {MAX_SOURCE_BYTES} byte limit")
     if path.suffix.lower() == ".gz":
         with gzip.open(path, "rb") as handle:
-            return handle.read()
+            data = handle.read(MAX_SOURCE_BYTES + 1)
+        if len(data) > MAX_SOURCE_BYTES:
+            raise ValueError(
+                f"Decompressed source exceeds {MAX_SOURCE_BYTES} byte limit"
+            )
+        return data
     return path.read_bytes()
 
 

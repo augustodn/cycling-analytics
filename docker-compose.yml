@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: cycling
+      POSTGRES_USER: cycling
+      POSTGRES_PASSWORD: local-only
+    ports:
+      - "5432:5432"
+    volumes:
+      - cycling-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cycling -d cycling"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  cycling-postgres:
