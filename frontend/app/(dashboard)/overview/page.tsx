@@ -22,6 +22,7 @@ export default async function OverviewPage() {
   return <>
     <h1>Overview</h1>
     <p className="muted">Training evidence from your uploaded activities. Missing sensor data remains unavailable, not zero.</p>
+    <p><Link className="button" href="/upload">Upload FIT/TCX</Link></p>
     <MetricGrid values={[
       ["Activities", activities.length],
       ["CTL", lastDay?.ctl?.toFixed(1) ?? "N/A"],

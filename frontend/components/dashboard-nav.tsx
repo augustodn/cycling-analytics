@@ -2,6 +2,7 @@ import Link from "next/link";
 
 const links = [
   ["Overview", "/overview"],
+  ["Upload FIT/TCX", "/upload"],
   ["Progress", "/progress"],
   ["FTP calibration", "/ftp-calibration"],
   ["Activities", "/activities"],

@@ -69,6 +69,7 @@ Vercel Function limits. If not, move ingestion to a durable worker.
 - [x] Expose authenticated API operations for progress, weekly training and FTP mismatch.
 - [x] Add initial Next.js Overview, Progress, FTP Calibration, Activity, Power Curve,
   HR Distribution, Durability, Load and Calendar views.
+- [x] Expose Upload FIT/TCX from the dashboard navigation and Overview.
 - [ ] Preserve existing metric semantics, data-quality warnings, filters, and parameter provenance.
 - [ ] Complete side-by-side parity checks and exclude Streamlit from the Vercel runtime bundle; keep the legacy local dashboard temporarily.
 
@@ -126,3 +127,4 @@ Vercel Function limits. If not, move ingestion to a durable worker.
 | 2026-10-02 | Exact sample/metric parity passed for 3 representative rides. Private Blob OIDC upload/read/delete passed in dev and production; anonymous reads denied. Parser input/decompression limit is 64 MiB; inactive users cannot obtain upload tokens or API access. |
 | 2026-10-02 | Final validation: 75 legacy unittests, 29 PostgreSQL/API/analytics integration tests, Ruff, Next build/lint, local and remote Vercel builds. Remote health returns 200; unauthenticated tenant API returns 401. Browser upload callback, friends' invites, workload benchmark and full visual parity remain. |
 | 2026-10-02 | Changed the Next build script to `next build --webpack` after repeatable local Turbopack trace cancellations; local Next build, lint and Vercel build now pass. |
+| 2026-10-02 | Added visible Upload FIT/TCX navigation and Overview links after owner couldn't find the upload page; production redeployed. |
