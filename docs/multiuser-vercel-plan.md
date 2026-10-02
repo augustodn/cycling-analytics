@@ -129,3 +129,4 @@ Vercel Function limits. If not, move ingestion to a durable worker.
 | 2026-10-02 | Changed the Next build script to `next build --webpack` after repeatable local Turbopack trace cancellations; local Next build, lint and Vercel build now pass. |
 | 2026-10-02 | Added visible Upload FIT/TCX navigation and Overview links after owner couldn't find the upload page; production redeployed. |
 | 2026-10-02 | Added FIT MIME types `application/fits` and `application/vnd.ant.fit` after the browser upload returned a Vercel Blob content-type mismatch. |
+| 2026-10-02 | Added an accessible dashboard loading status and CSS skeleton; page transitions previously had no `loading.tsx` fallback while server-rendered API requests completed. |

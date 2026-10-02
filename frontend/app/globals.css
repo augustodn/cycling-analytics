@@ -70,4 +70,12 @@ th { color: var(--muted); font-size: .8rem; font-weight: 600; }
 .form-grid .wide { grid-column: 1 / -1; }
 .metric-value { font-size: 1.5rem; }
 .json-output { overflow: auto; max-height: 500px; font-size: .75rem; }
+.loading-skeleton {
+  min-height: 9rem;
+  background: linear-gradient(90deg, #e9efeb 25%, #f6f8f6 37%, #e9efeb 63%);
+  background-size: 400% 100%;
+  animation: loading-shimmer 1.4s ease infinite;
+}
+@keyframes loading-shimmer { to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .loading-skeleton { animation: none; } }
 @media (max-width: 640px) { .content { width: calc(100% - 1rem); margin-top: 1rem; } .topbar { padding: .8rem; } }
