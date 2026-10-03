@@ -15,6 +15,7 @@ from cycling.models import (
     LoadRequest,
     PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
+    PowerHRRequest,
     SetContextRequest,
     StreamRequest,
     ToolResult,
@@ -92,6 +93,10 @@ def create_app(data_dir=".cycling"):
     @app.post("/durability", response_model=ToolResult)
     async def durability(request: DurabilityRequest):
         return app.state.service.durability(request)
+
+    @app.post("/power-hr", response_model=ToolResult)
+    async def power_hr(request: PowerHRRequest):
+        return app.state.service.power_hr(request)
 
     @app.post("/drift", response_model=ToolResult)
     async def drift(request: ActivityRequest):
