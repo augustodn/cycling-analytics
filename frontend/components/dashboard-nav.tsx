@@ -7,6 +7,7 @@ const links = [
   ["FTP calibration", "/ftp-calibration"],
   ["Activities", "/activities"],
   ["Power curve", "/power-curve"],
+  ["Power ↔ HR", "/power-hr"],
   ["Heart rate", "/heart-rate"],
   ["Durability", "/durability"],
   ["Load", "/load"],

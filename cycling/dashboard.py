@@ -12,6 +12,7 @@ from cycling.models import (
     LoadRequest,
     PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
+    PowerHRRequest,
     ProgressRequest,
     StreamRequest,
 )
@@ -185,6 +186,15 @@ def _cached_power_hr_zone_mismatch(
             period=period,
             environment=environment,
             parameter_mode=parameter_mode,
+        )
+        return result.model_dump(mode="json")
+
+
+@st.cache_data(ttl=300, max_entries=16, show_spinner=False)
+def _cached_power_hr(data_dir: str, request_json: str) -> dict:
+    with Store(data_dir) as store:
+        result = CyclingService(store).power_hr(
+            PowerHRRequest.model_validate_json(request_json)
         )
         return result.model_dump(mode="json")
 
@@ -677,6 +687,627 @@ def _power_hr_mismatch_matrix(go, data: dict):
     return figure
 
 
+def _power_hr_curve_figure(go, curves: list[dict], hr_zone_bounds: list[float]):
+    if not any(curve.get("bins") for curve in curves):
+        return None
+
+    figure = go.Figure()
+    colors = ["#167c52", "#dc7433", "#5966bd", "#b65d21", "#8d3478"]
+    for index, curve in enumerate(curves):
+        bins = curve.get("bins", [])
+        if not bins:
+            continue
+        medians = [point["hr_median_bpm"] for point in bins]
+        figure.add_scatter(
+            x=[point["power_w"] for point in bins],
+            y=medians,
+            mode="lines+markers",
+            name=curve["name"],
+            line={
+                "color": colors[index % len(colors)],
+                "dash": "dash" if curve.get("comparison") else "solid",
+            },
+            error_y={
+                "type": "data",
+                "symmetric": False,
+                "array": [
+                    max(0, point["hr_p75_bpm"] - point["hr_median_bpm"])
+                    for point in bins
+                ],
+                "arrayminus": [
+                    max(0, point["hr_median_bpm"] - point["hr_p25_bpm"])
+                    for point in bins
+                ],
+                "visible": True,
+                "thickness": 1,
+                "width": 2,
+            },
+            customdata=[
+                [
+                    point["power_low_w"],
+                    point["power_high_w"],
+                    point.get("activity_count", 1),
+                    point["valid_seconds"],
+                    point.get("status", "activity"),
+                    point["hr_p25_bpm"],
+                    point["hr_p75_bpm"],
+                    curve.get("detail", ""),
+                ]
+                for point in bins
+            ],
+            hovertemplate=(
+                "%{customdata[0]:.0f}–%{customdata[1]:.0f} W"
+                "<br>Median HR: %{y:.1f} bpm"
+                "<br>P25–P75: %{customdata[5]:.1f}–%{customdata[6]:.1f} bpm"
+                "<br>Activities: %{customdata[2]}"
+                "<br>Valid: %{customdata[3]} s"
+                "<br>Confidence: %{customdata[4]}<br>%{customdata[7]}"
+                "<extra>%{fullData.name}</extra>"
+            ),
+        )
+
+    zone_colors = list(HR_ZONE_COLORS.values())
+    for index, bound in enumerate(hr_zone_bounds):
+        figure.add_hline(
+            y=bound,
+            line_color=zone_colors[min(index + 1, len(zone_colors) - 1)],
+            line_width=2,
+            line_dash="dot",
+            annotation_text=f"HR zone boundary · {bound:g} bpm",
+            annotation_position="top left",
+        )
+    figure.update_layout(
+        title="Power vs. heart rate",
+        xaxis_title="Power (W)",
+        yaxis_title="Heart rate (bpm)",
+        hovermode="closest",
+    )
+    return figure
+
+
+def _power_hr_trend_figure(go, periods: list[dict], targets: list[int]):
+    if not any(period.get("points") for period in periods):
+        return None
+    figure = go.Figure()
+    colors = ["#167c52", "#5966bd", "#dc7433", "#8d3478", "#246c83", "#b65d21"]
+    for target_index, target in enumerate(targets):
+        for period in periods:
+            points = sorted(
+                (
+                    point
+                    for point in period.get("points", [])
+                    if point["target_power_w"] == target
+                ),
+                key=lambda point: point["date"],
+            )
+            activity_points = [
+                point for point in points if point["hr_median_bpm"] is not None
+            ]
+            rolling_points = [
+                point
+                for point in points
+                if point.get("rolling_median_hr_bpm") is not None
+            ]
+            if not activity_points and not rolling_points:
+                continue
+            if activity_points:
+                figure.add_scatter(
+                    x=[point["date"] for point in activity_points],
+                    y=[point["hr_median_bpm"] for point in activity_points],
+                    mode="markers",
+                    name=f"{period['name']} · {target} W per activity",
+                    line={"color": colors[target_index % len(colors)]},
+                    customdata=[
+                        [point["activity_id"], point["valid_seconds"]]
+                        for point in activity_points
+                    ],
+                    hovertemplate=(
+                        "%{x}<br>HR @ %{fullData.name}: %{y:.1f} bpm"
+                        "<br>Activity: %{customdata[0]}"
+                        "<br>Valid: %{customdata[1]} s<extra></extra>"
+                    ),
+                )
+            if rolling_points:
+                figure.add_scatter(
+                    x=[point["date"] for point in rolling_points],
+                    y=[point["rolling_median_hr_bpm"] for point in rolling_points],
+                    mode="lines+markers",
+                    name=f"{period['name']} · {target} W 3-activity median",
+                    line={
+                        "color": colors[target_index % len(colors)],
+                        "dash": "dash" if period.get("comparison") else "solid",
+                    },
+                )
+    figure.update_layout(
+        title="Heart rate at fixed power",
+        xaxis_title="Activity date",
+        yaxis_title="Heart rate (bpm)",
+        hovermode="closest",
+    )
+    return figure
+
+
+def _power_hr_delta_rows(first_group: dict | None, second_group: dict | None):
+    if first_group is None or second_group is None:
+        return []
+    first = {point["power_low_w"]: point for point in first_group.get("bins", [])}
+    second = {point["power_low_w"]: point for point in second_group.get("bins", [])}
+    rows = []
+    for low_w in sorted(first.keys() & second.keys()):
+        earlier, later = first[low_w], second[low_w]
+        if earlier.get("status") != "ok" or later.get("status") != "ok":
+            continue
+        rows.append(
+            {
+                "Power (W)": f"{low_w:g}–{earlier['power_high_w']:g}",
+                "Earlier HR (bpm)": earlier["hr_median_bpm"],
+                "Later HR (bpm)": later["hr_median_bpm"],
+                "Δ HR (bpm)": round(
+                    later["hr_median_bpm"] - earlier["hr_median_bpm"], 1
+                ),
+                "Earlier activities": earlier["activity_count"],
+                "Later activities": later["activity_count"],
+            }
+        )
+    return rows
+
+
+def _power_hr_groups(bucket: dict, activity_id: str | None, grouping: str):
+    if activity_id:
+        groups = bucket.get("activities", {}).get(activity_id, {}).get("analysis", {})
+        groups = groups.get("groups", []) if groups else []
+    else:
+        groups = bucket.get("groups", [])
+    expected_kind = {
+        "All samples": "all",
+        "By accumulated work": "work_band",
+        "First vs second half": "elapsed_split",
+        "First/middle/last third": "elapsed_split",
+    }[grouping]
+    return [group for group in groups if group.get("kind") == expected_kind]
+
+
+def _power_hr_period_name(group: dict):
+    if group.get("kind") == "work_band":
+        start = group.get("start_kj", 0)
+        end = group.get("end_kj")
+        label = (
+            "Fresh"
+            if start == 0
+            else "Early endurance"
+            if start < 1000
+            else "Meaningful fatigue"
+            if start < 1500
+            else "Late-race"
+            if start < 1800
+            else "Deep fatigue"
+        )
+        return f"{label} · {start:g}–{end if end is not None else '∞'} kJ"
+    if group.get("kind") == "elapsed_split":
+        parts = group.get("group_id", "").split("_")
+        part, total = parts[1], parts[-1]
+        labels = {
+            "2": ("First half", "Second half"),
+            "3": ("First third", "Middle third", "Final third"),
+        }
+        return labels[total][int(part) - 1]
+    return "All eligible samples"
+
+
+def _render_power_hr_view(
+    st, go, activities: list[dict], data_dir: str, parameter_mode: str
+):
+    st.subheader("Power ↔ Heart Rate")
+    st.caption(
+        "Descriptive, lag-aligned evidence. HR at fixed power and Power–HR curves "
+        "are not causal fitness tests. Indoor and outdoor are analyzed separately."
+    )
+    dates = [date.fromisoformat(item["start_time"][:10]) for item in activities]
+    latest = max(dates)
+    cycling_activities = [
+        item
+        for item in activities
+        if item.get("modality", "unknown")
+        in {"indoor", "road", "mtb", "gravel", "unknown"}
+    ]
+    if not cycling_activities:
+        st.info("No cycling activities are available for Power–HR analysis.")
+        return
+    default_end = latest
+    default_start = latest - timedelta(days=27)
+    earlier_end = default_start - timedelta(days=1)
+    earlier_start = earlier_end - timedelta(days=27)
+
+    with st.form("power_hr_controls"):
+        view = st.selectbox(
+            "Mode",
+            ["Single activity", "Period", "Compare periods"],
+            index=1,
+            key="power_hr_view",
+        )
+        activity_id = None
+        period_data = {}
+        compare_data = None
+        if view == "Single activity":
+            options = sorted(
+                cycling_activities, key=lambda item: item["start_time"], reverse=True
+            )
+            activity_by_id = {item["id"]: item for item in options}
+            activity_id = st.selectbox(
+                "Activity",
+                list(activity_by_id),
+                format_func=lambda item: (
+                    f"{activity_by_id[item]['start_time'][:10]} · "
+                    f"{activity_by_id[item].get('source_name', item)} · "
+                    f"{activity_by_id[item].get('modality', 'unknown')}"
+                ),
+                key="power_hr_activity",
+            )
+        elif view == "Period":
+            period = st.selectbox(
+                "Period", ["7d", "28d", "42d", "90d", "all", "custom"], index=1
+            )
+            if period == "custom":
+                period_data = None
+                period_range = st.date_input(
+                    "Period date range", value=(default_start, default_end)
+                )
+            else:
+                period_range = None
+                if period != "all":
+                    period_data = {"period": period, "end_date": default_end}
+                else:
+                    period_data = {"period": period}
+            if (
+                period_range is not None
+                and isinstance(period_range, (tuple, list))
+                and len(period_range) == 2
+            ):
+                period_data = {
+                    "period": "custom",
+                    "start_date": period_range[0],
+                    "end_date": period_range[1],
+                }
+        else:
+            period_data = None
+            earlier_range = st.date_input(
+                "Period A (earlier)", value=(earlier_start, earlier_end)
+            )
+            current_range = st.date_input(
+                "Period B (current)", value=(default_start, default_end)
+            )
+            if (
+                isinstance(earlier_range, (tuple, list))
+                and len(earlier_range) == 2
+                and isinstance(current_range, (tuple, list))
+                and len(current_range) == 2
+            ):
+                period_data = {
+                    "period": "custom",
+                    "start_date": current_range[0],
+                    "end_date": current_range[1],
+                }
+                compare_data = {
+                    "period": "custom",
+                    "start_date": earlier_range[0],
+                    "end_date": earlier_range[1],
+                }
+
+        environment = st.selectbox("Environment", ["both", "indoor", "outdoor"])
+        curve = st.selectbox("Curve", ["observed", "stable"])
+        grouping = st.selectbox(
+            "Fatigue grouping",
+            [
+                "All samples",
+                "By accumulated work",
+                "First vs second half",
+                "First/middle/last third",
+            ],
+        )
+        with st.expander("Analysis settings"):
+            lag_s = st.slider("HR lag (seconds)", 15, 60, 30)
+            power_window_s = st.number_input(
+                "Power rolling mean (seconds)", 1, 3600, 30
+            )
+            hr_window_s = st.number_input("HR rolling mean (seconds)", 1, 3600, 30)
+            bin_size_w = st.number_input("Power bin width (W)", 1.0, 100.0, 10.0, 1.0)
+            stable_window_s = st.number_input("Stable window (seconds)", 30, 3600, 180)
+            max_power_cv = st.number_input(
+                "Maximum power CV (fraction)", 0.01, 1.0, 0.08, 0.01
+            )
+            min_power_ftp_fraction = st.number_input(
+                "Minimum stable power (FTP fraction)", 0.0, 1.0, 0.4, 0.01
+            )
+            min_cadence_rpm = st.number_input(
+                "Minimum stable cadence (rpm)", 0, 200, 50
+            )
+            aerobic_only = st.checkbox("Restrict to 50–90% FTP", value=False)
+            min_activities = st.number_input(
+                "Minimum activities per bin",
+                1,
+                100,
+                1 if view == "Single activity" else 3,
+            )
+            min_total_seconds = st.number_input(
+                "Minimum valid seconds per bin", 0, 86400, 300
+            )
+            targets_text = st.text_input(
+                "Fixed power targets (W)", "180,190,200,210,220,240"
+            )
+            fatigue_text = st.text_input(
+                "Work band boundaries (kJ)", "500,1000,1500,1800"
+            )
+        submitted = st.form_submit_button("Analyze")
+
+    if not submitted:
+        st.info("Choose analysis settings and select Analyze.")
+        return
+    if period_data is None:
+        st.error("Choose valid dates for the selected period.")
+        return
+
+    try:
+        targets = [
+            int(value.strip()) for value in targets_text.split(",") if value.strip()
+        ]
+        fatigue_thresholds = [
+            float(value.strip()) for value in fatigue_text.split(",") if value.strip()
+        ]
+        payload = {
+            **period_data,
+            "activity_id": activity_id,
+            "compare_period": compare_data,
+            "environment": environment,
+            "parameter_mode": parameter_mode,
+            "mode": curve,
+            "lag_s": lag_s,
+            "power_window_s": power_window_s,
+            "hr_window_s": hr_window_s,
+            "bin_size_w": bin_size_w,
+            "stable_window_s": stable_window_s,
+            "max_power_cv": max_power_cv,
+            "min_power_ftp_fraction": min_power_ftp_fraction,
+            "min_cadence_rpm": min_cadence_rpm,
+            "aerobic_floor_ftp_fraction": 0.5 if aerobic_only else None,
+            "aerobic_ceiling_ftp_fraction": 0.9 if aerobic_only else None,
+            "fatigue_thresholds_kj": fatigue_thresholds
+            if grouping == "By accumulated work"
+            else [],
+            "elapsed_splits": 2
+            if grouping == "First vs second half"
+            else 3
+            if grouping == "First/middle/last third"
+            else None,
+            "min_activities": min_activities,
+            "min_total_seconds": min_total_seconds,
+            "target_power_w": targets,
+        }
+        request = PowerHRRequest.model_validate(payload)
+        result = _cached_power_hr(data_dir, request.model_dump_json(exclude_unset=True))
+        data = result["data"]
+    except (ValueError, TypeError) as exc:
+        st.error(f"Power–HR analysis unavailable: {exc}")
+        return
+    except Exception as exc:
+        st.error(f"Power–HR analysis unavailable: {exc}")
+        return
+
+    environments = (
+        [environment] if environment != "both" else ["indoor", "outdoor", "unknown"]
+    )
+    periods = [
+        (
+            "Selected activity"
+            if activity_id
+            else "Period B / current"
+            if data.get("comparison_period")
+            else "Selected period",
+            data["current_period"],
+        ),
+        ("Period A / earlier", data.get("comparison_period")),
+    ]
+    for environment_name in environments:
+        available_periods = [
+            (label, period["environments"].get(environment_name))
+            for label, period in periods
+            if period and period.get("environments", {}).get(environment_name)
+        ]
+        if not available_periods or not any(
+            bucket.get("activities") for _, bucket in available_periods
+        ):
+            continue
+        st.markdown(f"### {environment_name.title()}")
+        references = sorted(
+            (
+                activity
+                for _, bucket in available_periods
+                for activity in bucket.get("activities", {}).values()
+                if activity.get("hr_zone_bounds")
+            ),
+            key=lambda item: item["date"],
+        )
+        zone_bounds = references[-1]["hr_zone_bounds"] if references else []
+        if references:
+            reference = references[-1]
+            st.caption(
+                f"Zone lines use {reference['date']} effective HR boundaries "
+                f"({', '.join(str(value) for value in zone_bounds)} bpm). "
+                "Historical boundaries can vary between activities."
+            )
+        curves = []
+        selected_groups_by_period = {}
+        for label, bucket in available_periods:
+            groups = _power_hr_groups(bucket, activity_id, grouping)
+            activity_info = bucket.get("activities", {}).get(activity_id)
+            activity_detail = ""
+            if activity_info:
+                context = activity_info.get("context", {})
+                activity_detail = " · ".join(
+                    value
+                    for value in (
+                        f"{activity_info['date']} · {activity_info['modality']}",
+                        f"{activity_info['duration_s'] / 60:.0f} min",
+                        f"FTP {activity_info['effective_ftp_w']:.0f} W"
+                        if activity_info.get("effective_ftp_w") is not None
+                        else None,
+                        f"avg {context['avg_power_w']:.0f} W"
+                        if context.get("avg_power_w") is not None
+                        else None,
+                        f"{context['avg_hr_bpm']:.0f} bpm avg HR"
+                        if context.get("avg_hr_bpm") is not None
+                        else None,
+                        f"{activity_info['total_work_kj']:.0f} kJ"
+                        if activity_info.get("total_work_kj") is not None
+                        else None,
+                        f"{context['temperature_c']:.0f} °C"
+                        if context.get("temperature_c") is not None
+                        else None,
+                    )
+                    if value
+                )
+            selected_groups_by_period[label] = {
+                group["group_id"]: group for group in groups
+            }
+            for group in groups:
+                curves.append(
+                    {
+                        "name": f"{label} · {_power_hr_period_name(group)}",
+                        "comparison": label.startswith("Period A"),
+                        "bins": group.get("bins", []),
+                        "detail": activity_detail,
+                    }
+                )
+        figure = _power_hr_curve_figure(go, curves, zone_bounds)
+        if figure is None:
+            st.info("No eligible paired power/HR samples for this selection.")
+        else:
+            st.plotly_chart(figure, width="stretch")
+
+        trend_periods = [
+            {
+                "name": label,
+                "comparison": label.startswith("Period A"),
+                "points": bucket.get("hr_at_fixed_power", []),
+            }
+            for label, bucket in available_periods
+        ]
+        trend = _power_hr_trend_figure(go, trend_periods, targets)
+        if trend is not None:
+            for index, bound in enumerate(zone_bounds):
+                zone_colors = list(HR_ZONE_COLORS.values())
+                trend.add_hline(
+                    y=bound,
+                    line_color=zone_colors[min(index + 1, len(zone_colors) - 1)],
+                    line_width=1,
+                    line_dash="dot",
+                    annotation_text=f"HR zone · {bound:g} bpm",
+                )
+            st.plotly_chart(trend, width="stretch")
+            st.caption(
+                f"HR at fixed power uses aligned samples (lag {lag_s}s), "
+                "one point per activity; missing matches are not interpolated."
+            )
+            st.dataframe(
+                [
+                    {
+                        "Period": label,
+                        "Date": point["date"],
+                        "Activity": point["activity_id"],
+                        "Target power (W)": point["target_power_w"],
+                        "Median HR (bpm)": point["hr_median_bpm"],
+                        "3-activity rolling median HR": point["rolling_median_hr_bpm"],
+                        "Efficiency (W/bpm)": point["efficiency_w_per_bpm"],
+                        "Matched power (W)": point["matched_power_median_w"],
+                        "Valid seconds": point["valid_seconds"],
+                        "Confidence": point["status"],
+                    }
+                    for label, bucket in available_periods
+                    for point in bucket.get("hr_at_fixed_power", [])
+                ],
+                hide_index=True,
+            )
+
+        if data.get("comparison_period"):
+            earlier = selected_groups_by_period.get("Period A / earlier", {})
+            current = selected_groups_by_period.get("Period B / current", {})
+            delta_rows = [
+                {"Curve": _power_hr_period_name(current[group_id]), **row}
+                for group_id in current.keys() & earlier.keys()
+                for row in _power_hr_delta_rows(earlier[group_id], current[group_id])
+            ]
+            if delta_rows:
+                st.markdown(
+                    "**Current − earlier HR at matched power (sufficient-confidence bins)**"
+                )
+                st.dataframe(delta_rows, hide_index=True)
+
+        st.dataframe(
+            [
+                {
+                    "Period": label,
+                    "Date": activity["date"],
+                    "Activity": activity.get("context", {}).get(
+                        "source_name", activity["activity_id"]
+                    ),
+                    "Modality": activity["modality"],
+                    "Duration (min)": round(activity["duration_s"] / 60),
+                    "Average power (W)": activity["context"].get("avg_power_w"),
+                    "Average HR (bpm)": activity["context"].get("avg_hr_bpm"),
+                    "Temperature (°C)": activity["context"].get("temperature_c"),
+                    "FTP (W)": activity["effective_ftp_w"],
+                    "Work (kJ)": activity["total_work_kj"],
+                    "HR bounds (bpm)": activity["hr_zone_bounds"],
+                    "Data status": activity["reason"] or "available",
+                }
+                for label, bucket in available_periods
+                for activity in bucket.get("activities", {}).values()
+            ],
+            hide_index=True,
+        )
+    if environment == "both":
+        current_environments = data["current_period"]["environments"]
+        indoor_groups = {
+            item["group_id"]: item
+            for item in current_environments.get("indoor", {}).get("groups", [])
+        }
+        outdoor_groups = {
+            item["group_id"]: item
+            for item in current_environments.get("outdoor", {}).get("groups", [])
+        }
+        penalty = []
+        for group_id in indoor_groups.keys() & outdoor_groups.keys():
+            indoor_bins = {
+                point["power_low_w"]: point for point in indoor_groups[group_id]["bins"]
+            }
+            outdoor_bins = {
+                point["power_low_w"]: point
+                for point in outdoor_groups[group_id]["bins"]
+            }
+            for low_w in indoor_bins.keys() & outdoor_bins.keys():
+                inside, outside = indoor_bins[low_w], outdoor_bins[low_w]
+                if inside.get("status") == outside.get("status") == "ok":
+                    penalty.append(
+                        {
+                            "Curve": _power_hr_period_name(indoor_groups[group_id]),
+                            "Power (W)": f"{low_w:g}–{inside['power_high_w']:g}",
+                            "Indoor HR": inside["hr_median_bpm"],
+                            "Outdoor HR": outside["hr_median_bpm"],
+                            "Indoor penalty (bpm)": round(
+                                inside["hr_median_bpm"] - outside["hr_median_bpm"], 1
+                            ),
+                        }
+                    )
+        if penalty:
+            st.markdown("### Indoor vs outdoor HR penalty")
+            st.dataframe(penalty, hide_index=True)
+    st.caption(
+        data.get(
+            "caveat",
+            "Heat, hydration, terrain, sensors and lag are potential confounders.",
+        )
+    )
+
+
 def _durability_state_label(threshold_kj: float) -> str:
     for upper_bound, label in DURABILITY_STATE_LABELS:
         if threshold_kj < upper_bound:
@@ -891,6 +1522,7 @@ def run():
                 "Overview",
                 "Progress",
                 "FTP Calibration",
+                "Power ↔ Heart Rate",
                 "Activity",
                 "Power curve",
                 "Heart rate distribution",
@@ -906,6 +1538,10 @@ def run():
             st.info(
                 "No activities. Run: uv run python -m cycling ingest downloads/strava"
             )
+            return
+
+        if page == "Power ↔ Heart Rate":
+            _render_power_hr_view(st, go, activities, settings.data_dir, mode)
             return
 
         if page == "FTP Calibration":

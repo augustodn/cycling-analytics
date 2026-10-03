@@ -19,8 +19,11 @@ from cycling.dashboard import (
     _estimate_power_skill_percentile,
     _power_curve_figure,
     _power_curve_position,
+    _power_hr_curve_figure,
+    _power_hr_delta_rows,
     _power_hr_mismatch_figure,
     _power_hr_mismatch_matrix,
+    _power_hr_trend_figure,
     _power_skill_assessments,
     _power_skill_benchmark_table,
     _power_skill_progress_figure,
@@ -34,6 +37,82 @@ from tests.test_parsers import tcx_text
 
 
 class DashboardTests(unittest.TestCase):
+    def test_power_hr_curve_marks_hr_zones_and_delta_requires_confidence(self):
+        import plotly.graph_objects as go
+
+        group = {
+            "bins": [
+                {
+                    "power_low_w": 200,
+                    "power_high_w": 210,
+                    "power_w": 205,
+                    "hr_median_bpm": 135,
+                    "hr_p25_bpm": 130,
+                    "hr_p75_bpm": 140,
+                    "activity_count": 3,
+                    "valid_seconds": 600,
+                    "status": "ok",
+                }
+            ]
+        }
+        chart = _power_hr_curve_figure(
+            go, [{"name": "Outdoor", **group}], [127, 141, 147, 158]
+        )
+        self.assertEqual(chart.layout.xaxis.title.text, "Power (W)")
+        self.assertEqual(chart.layout.yaxis.title.text, "Heart rate (bpm)")
+        self.assertEqual(list(chart.data[0].x), [205])
+        self.assertEqual(list(chart.data[0].y), [135])
+        self.assertEqual(
+            [shape.line.color for shape in chart.layout.shapes],
+            ["#87CEEB", "#228B22", "#FFD700", "#FF69B4"],
+        )
+        earlier = {
+            "bins": [
+                {**group["bins"][0], "hr_median_bpm": 140},
+                {**group["bins"][0], "power_low_w": 210, "status": "low_confidence"},
+            ]
+        }
+        delta = _power_hr_delta_rows(earlier, group)
+        self.assertEqual(delta[0]["Δ HR (bpm)"], -5)
+        self.assertEqual(len(delta), 1)
+
+    def test_fixed_power_trend_shows_activity_points_and_rolling_median(self):
+        import plotly.graph_objects as go
+
+        chart = _power_hr_trend_figure(
+            go,
+            [
+                {
+                    "name": "Current",
+                    "points": [
+                        {
+                            "date": "2026-01-01",
+                            "activity_id": "ride-1",
+                            "target_power_w": 200,
+                            "hr_median_bpm": 136,
+                            "rolling_median_hr_bpm": 136,
+                            "valid_seconds": 120,
+                        },
+                        {
+                            "date": "2026-01-02",
+                            "activity_id": "ride-2",
+                            "target_power_w": 200,
+                            "hr_median_bpm": None,
+                            "rolling_median_hr_bpm": 136,
+                            "valid_seconds": 0,
+                        },
+                    ],
+                }
+            ],
+            [200],
+        )
+
+        self.assertEqual(len(chart.data), 2)
+        self.assertEqual(chart.data[0].mode, "markers")
+        self.assertEqual(chart.data[0].y, (136,))
+        self.assertEqual(chart.data[1].mode, "lines+markers")
+        self.assertEqual(chart.data[1].y, (136, 136))
+
     def test_zone_mismatch_charts_show_rolling_series_and_heatmap_minutes(self):
         import plotly.graph_objects as go
 
@@ -348,6 +427,16 @@ class DashboardTests(unittest.TestCase):
 
                 # FTP calibration handles activities with no valid windows.
                 app.sidebar.selectbox[0].set_value("FTP Calibration").run()
+                self.assertEqual(len(app.exception), 0)
+
+                # Power–HR runs through the same service from the local dashboard.
+                app.sidebar.selectbox[0].set_value("Power ↔ Heart Rate").run()
+                self.assertEqual(len(app.exception), 0)
+                app.selectbox[0].set_value("Single activity").run()
+                app.button[0].click().run()
+                self.assertEqual(len(app.exception), 0)
+                app.selectbox[0].set_value("Period").run()
+                app.button[0].click().run()
                 self.assertEqual(len(app.exception), 0)
 
                 # Overview

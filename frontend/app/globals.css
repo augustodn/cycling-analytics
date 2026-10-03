@@ -16,7 +16,7 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 a { color: inherit; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 .shell { min-height: 100vh; }
 .topbar {
   display: flex;
@@ -66,7 +66,7 @@ th, td { border-bottom: 1px solid var(--line); padding: .7rem .5rem; white-space
 th { color: var(--muted); font-size: .8rem; font-weight: 600; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
 .form-grid label { display: grid; gap: .4rem; font-size: .9rem; }
-.form-grid input { min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: .65rem; }
+.form-grid input, .form-grid select { min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: .65rem; }
 .form-grid .wide { grid-column: 1 / -1; }
 .metric-value { font-size: 1.5rem; }
 .json-output { overflow: auto; max-height: 500px; font-size: .75rem; }

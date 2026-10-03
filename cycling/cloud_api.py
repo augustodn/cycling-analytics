@@ -30,6 +30,7 @@ from cycling.models import (
     LoadRequest,
     PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
+    PowerHRRequest,
     ProgressRequest,
     SetContextRequest,
     StreamRequest,
@@ -194,6 +195,11 @@ def period_hr_distributions(request: PeriodHRDistributionRequest, store: StoreDe
 @app.post("/api/v1/durability", response_model=ToolResult)
 def durability(request: DurabilityRequest, store: StoreDep):
     return CyclingService(store).durability(request)
+
+
+@app.post("/api/v1/power-hr", response_model=ToolResult)
+def power_hr(request: PowerHRRequest, store: StoreDep):
+    return CyclingService(store).power_hr(request)
 
 
 @app.post("/api/v1/aerobic-durability", response_model=ToolResult)

@@ -16,6 +16,14 @@ from cycling.analytics.power import (
     power_curve_detailed,
     threshold_estimate,
 )
+from cycling.analytics.power_hr import (
+    PowerHRConfig,
+    aggregate_power_hr,
+    aggregate_power_hr_bins,
+    align_power_hr_samples,
+    analyze_power_hr,
+    hr_at_target_power,
+)
 from cycling.analytics.progress import (
     calculate_fatigued_pdc_for_activity,
     calculate_fixed_hr_ef_trend_point,
@@ -71,6 +79,11 @@ __all__ = [
     "calculate_aerobic_durability",
     "aerobic_drift",
     "analyze_power_hr_windows",
+    "analyze_power_hr",
+    "align_power_hr_samples",
+    "aggregate_power_hr",
+    "aggregate_power_hr_bins",
+    "hr_at_target_power",
     "threshold_estimate",
     "training_load",
     # Specific Functions
@@ -94,6 +107,7 @@ __all__ = [
     "calculate_coverage",
     # Dataclasses
     "Coverage",
+    "PowerHRConfig",
     "MMPPoint",
     "PowerSummary",
     "HRSummary",

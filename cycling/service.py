@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
 from math import ceil, isfinite
 from statistics import median
@@ -10,6 +11,13 @@ from typing import TYPE_CHECKING, Any
 from cycling import ALGORITHM_VERSION, analytics
 from cycling.analytics.durability import calculate_fresh_references
 from cycling.analytics.power import _validate_durations
+from cycling.analytics.power_hr import (
+    PowerHRConfig,
+    aggregate_power_hr_bins,
+    align_power_hr_samples,
+    analyze_power_hr,
+    hr_at_target_power,
+)
 from cycling.analytics.zones import HR_ZONE_DEFINITIONS
 from cycling.models import (
     ActivityContext,
@@ -21,6 +29,8 @@ from cycling.models import (
     LoadRequest,
     PeriodHRDistributionRequest,
     PeriodPowerCurveRequest,
+    PowerHRPeriod,
+    PowerHRRequest,
     ProgressRequest,
     StreamRequest,
     ToolResult,
@@ -30,7 +40,15 @@ from cycling.storage_utils import encode, now
 if TYPE_CHECKING:
     from cycling.storage import Store
 
-PERIOD_DAYS = {"7d": 7, "21d": 21, "30d": 30, "90d": 90, "365d": 365}
+PERIOD_DAYS = {
+    "7d": 7,
+    "21d": 21,
+    "28d": 28,
+    "30d": 30,
+    "42d": 42,
+    "90d": 90,
+    "365d": 365,
+}
 
 
 def _filter_period_activities(
@@ -65,7 +83,7 @@ def _filter_period_activities(
         return selected
 
     ref_date = end_date or max(activity_dates.values())
-    cutoff = ref_date - timedelta(days=PERIOD_DAYS[period])
+    cutoff = ref_date - timedelta(days=PERIOD_DAYS[period] - 1)
     return [
         activity
         for activity in selected
@@ -559,6 +577,287 @@ class CyclingService:
                 ],
                 "activity_ids": matching_activities,
             },
+            parameter_mode=request.parameter_mode,
+        )
+
+    def power_hr(self, request: PowerHRRequest):
+        """Activity-first curves; never pool indoor and outdoor observations."""
+        config = PowerHRConfig(
+            **{
+                name: getattr(request, name)
+                for name in PowerHRConfig.__dataclass_fields__
+                if name != "mode"
+            },
+            mode="all" if request.mode == "observed" else "stable",
+        )
+        needs_ftp = (
+            request.mode == "stable"
+            or request.aerobic_floor_ftp_fraction is not None
+            or request.aerobic_ceiling_ftp_fraction is not None
+        )
+
+        def environment(activity):
+            modality = activity.get("modality", "unknown")
+            if modality == "indoor":
+                return "indoor"
+            return "outdoor" if modality in {"road", "mtb", "gravel"} else "unknown"
+
+        catalog = (
+            [self.store.activity(request.activity_id)]
+            if request.activity_id is not None
+            else self.store.activities()
+        )
+        cycling_modalities = {"indoor", "road", "mtb", "gravel", "unknown"}
+        catalog = [
+            activity
+            for activity in catalog
+            if activity.get("modality", "unknown") in cycling_modalities
+        ]
+        # Request-local reuse only: overlapping periods read/analyze each ride once.
+        results = {}
+
+        def activity_result(activity):
+            activity_id = activity["id"]
+            if activity_id in results:
+                return results[activity_id]
+            activity_date = date.fromisoformat(activity["start_time"][:10])
+            parameter_id, parameters = self.store.parameters(
+                datetime.now(UTC).date()
+                if request.parameter_mode == "current"
+                else activity_date,
+                mode=request.parameter_mode,
+            )
+            ftp = parameters.ftp_w if parameters is not None else None
+            try:
+                samples = self.store.samples(activity_id)
+            except FileNotFoundError:
+                samples = []
+            observed_duration = max(
+                (row["elapsed_s"] + 1 for row in samples), default=0
+            )
+            duration = max(observed_duration, ceil(activity.get("duration_s") or 0))
+            missing_ftp = needs_ftp and ftp is None
+            # Recover work context, not substitute observed bins for stable bins.
+            activity_config = (
+                replace(
+                    config,
+                    mode="all",
+                    aerobic_floor_ftp_fraction=None,
+                    aerobic_ceiling_ftp_fraction=None,
+                )
+                if missing_ftp
+                else config
+            )
+            analysis = analyze_power_hr(
+                samples,
+                config=activity_config,
+                effective_ftp_w=ftp,
+                fatigue_thresholds_kj=request.fatigue_thresholds_kj,
+                elapsed_splits=request.elapsed_splits,
+                activity_duration_s=duration or None,
+            )
+            metadata = {
+                "activity_id": activity_id,
+                "date": activity_date.isoformat(),
+                "start_time": activity["start_time"],
+                "modality": activity.get("modality", "unknown"),
+                "environment": environment(activity),
+                "duration_s": duration,
+                "parameter_id": parameter_id,
+                "parameter_mode": request.parameter_mode,
+                "parameter_effective_date": parameters.effective_date.isoformat()
+                if parameters is not None
+                else None,
+                "effective_ftp_w": ftp,
+                "hr_zone_bounds": parameters.hr_zone_bounds
+                if parameters is not None
+                else None,
+                "observed_work_kj": analysis["observed_work_kj"],
+                "work_complete": analysis["work_complete"],
+                "total_work_kj": analysis["observed_work_kj"]
+                if analysis["work_complete"]
+                else None,
+                "context": {
+                    key: activity[key]
+                    for key in (
+                        "rpe",
+                        "context_id",
+                        "source_name",
+                        "quality_flags",
+                        "avg_power_w",
+                        "avg_hr_bpm",
+                        "temperature_c",
+                    )
+                    if key in activity
+                },
+            }
+            reason = (
+                "missing_ftp"
+                if missing_ftp
+                else "missing_samples"
+                if not samples
+                else "no_eligible_samples"
+                if not analysis["valid_seconds"]
+                else None
+            )
+            pairs = (
+                align_power_hr_samples(
+                    samples, config=activity_config, effective_ftp_w=ftp
+                )
+                if not missing_ftp
+                else []
+            )
+            fixed_power_targets = [
+                {
+                    "activity_id": activity_id,
+                    "date": activity_date.isoformat(),
+                    "modality": activity.get("modality", "unknown"),
+                    "environment": environment(activity),
+                    "effective_ftp_w": ftp,
+                    **hr_at_target_power(
+                        pairs,
+                        target,
+                        tolerance_w=request.target_power_tolerance_w,
+                        min_seconds=request.target_power_min_seconds,
+                    ),
+                }
+                for target in request.target_power_w
+            ]
+            results[activity_id] = {
+                **metadata,
+                "available": reason is None,
+                "reason": reason,
+                "parameter_warning": "missing_parameters"
+                if parameters is None
+                else None,
+                "analysis": None if missing_ftp else analysis,
+                "hr_at_fixed_power": fixed_power_targets,
+            }
+            return results[activity_id]
+
+        def period_result(period, *, comparison=False):
+            if (
+                comparison
+                and period.period not in {"all", "custom"}
+                and period.end_date is None
+                and request.period != "all"
+            ):
+                if request.period == "custom":
+                    current_start = request.start_date
+                else:
+                    reference = request.end_date or max(
+                        (
+                            date.fromisoformat(activity["start_time"][:10])
+                            for activity in catalog
+                        ),
+                        default=date.today(),
+                    )
+                    current_start = reference - timedelta(
+                        days=PERIOD_DAYS[request.period] - 1
+                    )
+                period = PowerHRPeriod(
+                    period=period.period,
+                    end_date=current_start - timedelta(days=1),
+                )
+            activities = (
+                catalog
+                if request.activity_id is not None
+                else _filter_period_activities(
+                    catalog, "all", period.period, period.start_date, period.end_date
+                )
+            )
+            buckets = (
+                ["indoor", "outdoor", "unknown"]
+                if request.environment == "both"
+                else [request.environment]
+            )
+            environments = {}
+            for bucket in buckets:
+                members = {
+                    activity["id"]: activity_result(activity)
+                    for activity in sorted(activities, key=lambda a: a["start_time"])
+                    if environment(activity) == bucket
+                }
+                aggregate = aggregate_power_hr_bins(
+                    {
+                        ident: member["analysis"]
+                        for ident, member in members.items()
+                        if member["analysis"] is not None
+                    },
+                    min_activities=request.min_activities,
+                    min_total_seconds=request.min_total_seconds,
+                )
+                fixed_power_trend = [
+                    dict(point)
+                    for member in members.values()
+                    for point in member["hr_at_fixed_power"]
+                ]
+                for target in request.target_power_w:
+                    target_points = sorted(
+                        (
+                            point
+                            for point in fixed_power_trend
+                            if point["target_power_w"] == target
+                        ),
+                        key=lambda point: point["date"],
+                    )
+                    for index, point in enumerate(target_points):
+                        window = target_points[max(0, index - 2) : index + 1]
+                        observed = [
+                            item["hr_median_bpm"]
+                            for item in window
+                            if item["status"] == "ok"
+                            and item["hr_median_bpm"] is not None
+                        ]
+                        point["rolling_median_hr_bpm"] = (
+                            median(observed) if observed else None
+                        )
+                environments[bucket] = {
+                    **aggregate,
+                    "config": asdict(config),
+                    "activities_evaluated": len(members),
+                    "activities": {
+                        ident: (
+                            member
+                            if request.activity_id is not None
+                            else {
+                                key: value
+                                for key, value in member.items()
+                                if key != "analysis"
+                            }
+                        )
+                        for ident, member in members.items()
+                    },
+                    "hr_at_fixed_power": fixed_power_trend,
+                    "rolling_median_window_activities": 3,
+                }
+            return {
+                "selection": {"activity_id": request.activity_id}
+                if request.activity_id is not None
+                else period.model_dump(mode="json", include=PowerHRPeriod.model_fields),
+                "environments": environments,
+            }
+
+        return self.result(
+            "power_hr",
+            {
+                "request": request.model_dump(mode="json"),
+                "current_period": period_result(request),
+                "comparison_period": period_result(
+                    request.compare_period, comparison=True
+                )
+                if request.compare_period is not None
+                else None,
+                "fixed_power_trend_basis": {
+                    "method": "aligned_power_hr_samples",
+                    "lag_s": request.lag_s,
+                    "curve_mode": request.mode,
+                    "power_tolerance_w": request.target_power_tolerance_w,
+                    "minimum_seconds": request.target_power_min_seconds,
+                },
+                "caveat": "Descriptive observations, not causal fitness or fatigue estimates; heat, hydration, terrain, sensors and lag remain confounders.",
+            },
+            parameter_id=results.get(request.activity_id, {}).get("parameter_id"),
             parameter_mode=request.parameter_mode,
         )
 

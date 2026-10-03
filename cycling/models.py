@@ -2,7 +2,7 @@
 
 from datetime import date
 from itertools import pairwise
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -199,6 +199,85 @@ class PeriodHRDistributionRequest(Contract):
             and self.end_date < self.start_date
         ):
             raise ValueError("end_date must not precede start_date")
+        return self
+
+
+class PowerHRPeriod(Contract):
+    period: Literal[
+        "7d", "21d", "28d", "30d", "42d", "90d", "365d", "all", "custom"
+    ] = "all"
+    start_date: date | None = None
+    end_date: date | None = None
+
+    @model_validator(mode="after")
+    def ordered_dates(self):
+        if self.period == "custom" and (
+            self.start_date is None or self.end_date is None
+        ):
+            raise ValueError("custom period requires start_date and end_date")
+        if self.start_date is not None and self.period != "custom":
+            raise ValueError("start_date requires a custom period")
+        if self.period == "all" and self.end_date is not None:
+            raise ValueError("end_date requires a bounded period")
+        if (
+            self.start_date is not None
+            and self.end_date is not None
+            and self.end_date < self.start_date
+        ):
+            raise ValueError("end_date must not precede start_date")
+        return self
+
+
+class PowerHRRequest(PowerHRPeriod):
+    activity_id: str | None = Field(default=None, min_length=1, max_length=128)
+    compare_period: PowerHRPeriod | None = None
+    environment: Literal["indoor", "outdoor", "both"] = "both"
+    parameter_mode: Literal["historical", "current"] = "historical"
+    mode: Literal["observed", "stable"] = "observed"
+    lag_s: int = Field(default=30, ge=15, le=60, strict=True)
+    power_window_s: int = Field(default=30, ge=1, le=3600, strict=True)
+    hr_window_s: int = Field(default=30, ge=1, le=3600, strict=True)
+    bin_size_w: float = Field(default=10.0, gt=0, le=1000)
+    stable_window_s: int = Field(default=180, ge=1, le=3600, strict=True)
+    max_power_cv: float = Field(default=0.08, ge=0)
+    min_power_ftp_fraction: float = Field(default=0.40, ge=0)
+    min_cadence_rpm: float = Field(default=50.0, ge=0)
+    aerobic_floor_ftp_fraction: float | None = Field(default=None, ge=0)
+    aerobic_ceiling_ftp_fraction: float | None = Field(default=None, ge=0)
+    fatigue_thresholds_kj: list[Annotated[float, Field(gt=0)]] = Field(
+        default=[], max_length=20
+    )
+    elapsed_splits: int | None = Field(default=None, ge=2, le=3, strict=True)
+    min_activities: int = Field(default=3, ge=1, strict=True)
+    min_total_seconds: int = Field(default=300, ge=0, strict=True)
+    target_power_w: list[Annotated[int, Field(gt=0, le=1000, strict=True)]] = Field(
+        default=[180, 190, 200, 210, 220, 240], max_length=20
+    )
+    target_power_tolerance_w: float = Field(default=5.0, ge=0, le=100)
+    target_power_min_seconds: int = Field(default=60, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def valid_analysis(self):
+        if self.activity_id is not None and (
+            self.period != "all"
+            or self.start_date is not None
+            or self.end_date is not None
+            or self.compare_period is not None
+        ):
+            raise ValueError("activity_id cannot be combined with period selection")
+        if any(a >= b for a, b in pairwise(self.fatigue_thresholds_kj)):
+            raise ValueError("fatigue_thresholds_kj must be strictly increasing")
+        if len(set(self.target_power_w)) != len(self.target_power_w):
+            raise ValueError("target_power_w must be unique")
+        floor = max(
+            self.aerobic_floor_ftp_fraction or 0.0,
+            self.min_power_ftp_fraction if self.mode == "stable" else 0.0,
+        )
+        if (
+            self.aerobic_ceiling_ftp_fraction is not None
+            and self.aerobic_ceiling_ftp_fraction < floor
+        ):
+            raise ValueError("aerobic ceiling must be >= the effective power floor")
         return self
 
 
