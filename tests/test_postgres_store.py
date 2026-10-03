@@ -28,12 +28,14 @@ from xml.etree.ElementTree import ParseError
 
 import pytest
 
+from cycling import analytics
 from cycling.ingestion import ingest
 from cycling.migrations import apply_migrations
 from cycling.models import (
     ActivityContext,
     ActivityRequest,
     AthleteParameters,
+    CurveRequest,
     LoadRequest,
     PeriodPowerCurveRequest,
 )
@@ -328,6 +330,266 @@ def test_overview_keeps_warm_load_cache_blob_reads_and_latest_curve_anchor(
         PeriodPowerCurveRequest(period="90d", end_date=date(2035, 1, 1))
     )
     assert outside.data["activities_evaluated"] == 0
+
+
+def test_power_curve_cache_survives_new_stores_and_keeps_metadata_fresh(
+    stores, monkeypatch
+):
+    store = stores("alice")
+    ident = upload(store)["activity_id"]
+    activity = store.activity(ident)
+    rows = [
+        {**row, "power_w": 100 + index / 7}
+        for index, row in enumerate(store.samples(ident))
+    ]
+    rows[5]["active"] = False
+    rows[10]["power_w"] = None
+    store.write_activity(ident, activity, rows)
+    durations = [7, 1, 18000, 7]
+    request = CurveRequest(activity_id=ident, durations=durations)
+    expected = {str(d): w for d, w in analytics.power_curve(rows, durations).items()}
+    cold = CyclingService(store).power_curve(request)
+    assert cold.data["watts"] == expected
+    store.set_context(ident, ActivityContext(rpe=8, modality="mtb"))
+    store.add_parameters(AthleteParameters(ftp_w=350))
+    store.db.execute(
+        "INSERT INTO cycling_quality_flags VALUES (%s,%s,%s)",
+        (store.user_id, ident, "new-quality-flag"),
+    )
+    warm_store = stores("alice")
+    reads = Mock(side_effect=AssertionError("Warm curve read samples"))
+    monkeypatch.setattr(warm_store.objects, "read", reads)
+    warm = CyclingService(warm_store).power_curve(
+        request.model_copy(update={"parameter_mode": "current", "rpe": 3})
+    )
+    reordered = [18000, 7, 7, 1]
+    period = CyclingService(warm_store).period_power_curve(
+        PeriodPowerCurveRequest(period="90d", modality="mtb", durations=reordered)
+    )
+    assert warm.data["watts"] == period.data["watts"] == expected
+    assert warm.computed_at != cold.computed_at
+    assert "new-quality-flag" in warm.data["quality_flags"]
+    assert period.data["durations_s"] == reordered
+    assert list(period.data["watts"]) == ["18000", "7", "1"]
+    reads.assert_not_called()
+    snapshots = store.db.execute(
+        "SELECT parameter_id,context_id,sample_path,result FROM cycling_metrics WHERE user_id=%s",
+        (store.user_id,),
+    ).fetchall()
+    assert len(snapshots) == 1
+    assert snapshots[0]["parameter_id"] is snapshots[0]["context_id"] is None
+    assert set(snapshots[0]["result"]["data"]["activity"]) == {
+        "sample_path",
+        "normalizer_version",
+        "ingested_at",
+    }
+    assert snapshots[0]["sample_path"] == store.activity(ident)["sample_path"]
+
+
+def test_power_curve_cache_is_owner_scoped_for_identical_activity_ids(stores):
+    alice, bob = stores("alice"), stores("bob")
+    ident = upload(alice)["activity_id"]
+    assert upload(bob)["activity_id"] == ident
+    activity = bob.activity(ident)
+    bob.write_activity(
+        ident, activity, [{**row, "power_w": 350} for row in bob.samples(ident)]
+    )
+    request = CurveRequest(activity_id=ident, durations=[1])
+    assert CyclingService(alice).power_curve(request).data["watts"] == {"1": 200}
+    key = alice.db.execute(
+        "SELECT cache_key FROM cycling_metrics WHERE user_id=%s", (alice.user_id,)
+    ).fetchone()["cache_key"]
+    assert bob.cached(ident, key) is None
+    assert CyclingService(bob).power_curve(request).data["watts"] == {"1": 350}
+    assert CyclingService(stores("alice")).power_curve(request).data["watts"] == {
+        "1": 200
+    }
+    assert CyclingService(stores("bob")).power_curve(request).data["watts"] == {
+        "1": 350
+    }
+
+
+def test_power_curve_cache_key_invalidates_versions_and_exact_duration_list(
+    stores, monkeypatch
+):
+    store = stores("alice")
+    ident = upload(store)["activity_id"]
+    service = CyclingService(store)
+    reads = Mock(wraps=store.samples)
+    monkeypatch.setattr(store, "samples", reads)
+    request = CurveRequest(activity_id=ident, durations=[1])
+    service.power_curve(request)
+    monkeypatch.setattr("cycling.service.ALGORITHM_VERSION", "mmp-test-v2")
+    assert service.power_curve(request).algorithm_version == "mmp-test-v2"
+    store.db.execute(
+        "UPDATE cycling_activities SET normalizer_version=%s WHERE user_id=%s AND id=%s",
+        ("normalizer-test-v2", store.user_id, ident),
+    )
+    assert (
+        service.power_curve(request).data["normalizer_version"] == "normalizer-test-v2"
+    )
+    service.power_curve(request.model_copy(update={"durations": [1, 1]}))
+    service.power_curve(request.model_copy(update={"durations": [2]}))
+    assert reads.call_count == 5
+    with pytest.raises(ValueError, match="positive integer"):
+        service.power_curve(request.model_copy(update={"durations": [True]}))
+    assert reads.call_count == 5
+    for invalid in [
+        ["not-a-payload"],
+        {"watts": {"1": True}},
+        {"watts": {"1": "200"}},
+        {"watts": {"1": float("nan")}},
+        {"watts": {"1": float("inf")}},
+        {"watts": {"2": 999}},
+    ]:
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "cached", Mock(return_value=invalid))
+            assert service.power_curve(request).data["watts"] == {"1": 200}
+    assert reads.call_count == 11
+
+
+def test_period_curve_cache_preserves_anchor_boundaries_ties_and_context_filters(
+    stores, monkeypatch
+):
+    store = stores("alice")
+    ident = upload(store)["activity_id"]
+    original, rows = store.activity(ident), store.samples(ident)
+    for name, start, modality, power in [
+        ("old", "2026-01-01", "road", 900),
+        ("boundary", "2026-01-02", "road", 300),
+        ("a", "2026-04-02", "road", 300),
+        ("b", "2026-04-02", "road", 300),
+        ("null", "2026-04-01", "road", None),
+        ("future", "2030-01-01", "mtb", 1000),
+    ]:
+        store.write_activity(
+            name,
+            {
+                **original,
+                "source_hash": name,
+                "start_time": start + "T00:00:00Z",
+                "modality": modality,
+            },
+            [{**row, "power_w": power} for row in rows],
+        )
+    service = CyclingService(store)
+    request = PeriodPowerCurveRequest(
+        period="90d", modality="road", durations=[1, 18000]
+    )
+    cold = service.period_power_curve(request)
+    assert cold.data["activities_evaluated"] == 4
+    assert cold.data["watts"] == {"1": 300, "18000": None}
+    assert cold.data["records"]["1"]["activity_id"] == "a"
+    assert cold.data["records"]["18000"] is None
+    reads = Mock(side_effect=AssertionError("Warm period read samples"))
+    monkeypatch.setattr(store.objects, "read", reads)
+    assert service.period_power_curve(request).data == cold.data
+    store.set_context("a", ActivityContext(modality="mtb"))
+    assert (
+        service.period_power_curve(request).data["records"]["1"]["activity_id"] == "b"
+    )
+    custom = service.period_power_curve(
+        request.model_copy(
+            update={
+                "period": "custom",
+                "start_date": date(2026, 1, 2),
+                "end_date": date(2026, 1, 2),
+            }
+        )
+    )
+    assert custom.data["activities_evaluated"] == 1
+    assert custom.data["records"]["1"]["activity_id"] == "boundary"
+    outside = service.period_power_curve(
+        request.model_copy(update={"end_date": date(2035, 1, 1)})
+    )
+    assert outside.data["activities_evaluated"] == 0
+    reads.assert_not_called()
+
+
+def test_power_curve_cache_pins_revision_during_concurrent_reingest(
+    stores, monkeypatch
+):
+    reader, writer = stores("alice"), stores("alice")
+    ident = upload(reader)["activity_id"]
+    original, rows = reader.activity(ident), reader.samples(ident)
+    cached, save = reader.cached, reader.save_metrics
+
+    def reingest_before_read(activity_id, key):
+        result = cached(activity_id, key)
+        writer.write_activity(ident, original, [{**r, "power_w": 350} for r in rows])
+        return result
+
+    def reingest_before_save(activity_id, key, result):
+        writer.write_activity(ident, original, [{**r, "power_w": 450} for r in rows])
+        save(activity_id, key, result)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reader, "cached", reingest_before_read)
+        patch.setattr(reader, "save_metrics", reingest_before_save)
+        old = CyclingService(reader).period_power_curve(
+            PeriodPowerCurveRequest(period="90d", durations=[1])
+        )
+    assert old.data["watts"] == {"1": 200}
+    snapshot = reader.db.execute(
+        "SELECT sample_path FROM cycling_metrics WHERE user_id=%s", (reader.user_id,)
+    ).fetchone()
+    assert snapshot["sample_path"] == original["sample_path"]
+    assert CyclingService(stores("alice")).power_curve(
+        CurveRequest(activity_id=ident, durations=[1])
+    ).data["watts"] == {"1": 450}
+
+
+def test_warm_curve_api_still_authenticates_and_checks_account_activation(
+    stores, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from cycling.cloud_api import app
+    from tests.test_cloud_api import _token
+
+    store = stores("alice")
+    ident = upload(store)["activity_id"]
+    CyclingService(store).power_curve(CurveRequest(activity_id=ident, durations=[1]))
+    monkeypatch.setenv("DATABASE_URL", store._test_dsn)
+    monkeypatch.setenv("INTERNAL_API_SECRET", "x" * 32)
+    monkeypatch.setattr(
+        "cycling.cloud_api.PostgresStore",
+        lambda dsn, user_id: PostgresStore(
+            dsn, user_id, object_root=store.objects.root
+        ),
+    )
+    reads = Mock(side_effect=AssertionError("Authenticated warm curve read samples"))
+    monkeypatch.setattr(_ObjectStore, "read", reads)
+    body = {"activity_id": ident, "durations": [1]}
+    headers = {"Authorization": f"Bearer {_token('x' * 32, 'alice')}"}
+    with TestClient(app) as client:
+        assert client.post("/api/v1/power-curve", json=body).status_code == 401
+        assert (
+            client.post(
+                "/api/v1/power-curve",
+                json=body,
+                headers={"Authorization": "Bearer forged"},
+            ).status_code
+            == 401
+        )
+        response = client.post("/api/v1/power-curve", json=body, headers=headers)
+        assert response.status_code == 200
+        assert response.json()["data"]["watts"] == {"1": 200}
+        store.db.execute(
+            "UPDATE cycling_users SET is_active=false WHERE user_id=%s",
+            (store.user_id,),
+        )
+        assert (
+            client.post("/api/v1/power-curve", json=body, headers=headers).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                "/api/v1/power-curves", json={"durations": [1]}, headers=headers
+            ).status_code
+            == 401
+        )
+    reads.assert_not_called()
 
 
 def test_every_public_lookup_and_write_is_owner_scoped(stores):

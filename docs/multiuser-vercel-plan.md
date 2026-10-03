@@ -114,6 +114,68 @@ Vercel Function limits. If not, move ingestion to a durable worker.
 - Add friend emails to `cycling_invites` and to Google OAuth Test Users if the consent app remains in Testing.
 - Exercise one browser FIT/TCX upload and verify its activity is visible only to the owner.
 
+## Performance follow-up — local only, rollout awaiting review
+
+**Selected slice:** persist per-activity MMP watts in the existing owner-scoped
+`cycling_metrics` table/index from migration 002. Single and period power curves
+share these snapshots. No new migration, dependency, frontend response cache,
+deployment, or production database operation.
+
+Production timings after an Overview refresh identified period power curves
+(`32,706 ms`) and weekly HR training (`22,588 ms`) as the dominant paths, both
+with sequential private sample downloads. Load (`1,615–2,617 ms`) already uses
+analysis snapshots; warm activities (`83–85 ms`) are not the target. These are
+baseline observations, not predicted post-change timings.
+
+### Correctness and invalidation
+
+- Cache identity: verified store owner + activity ID + `activity_power_curve:v1`
+  + analytics algorithm version + catalog normalizer version + immutable sample
+  path + ingestion revision timestamp + exact sorted validated duration list.
+  Duplicates remain part of identity; response order remains the request order.
+- PostgreSQL reads the sample revision pinned by the authorized catalog read.
+  The cached snapshot records that analyzed revision even if reingest publishes
+  a newer revision during calculation. DuckDB needs the ingestion timestamp
+  because it overwrites stable paths; its existing single-process assumption stays.
+- Date/modality selection runs before lookup, including the newest selected
+  activity anchor for `90d`, inclusive boundaries, explicit end dates, and ties.
+  Catalog/context and response metadata are read fresh. MMP itself does not
+  depend on FTP/HR settings, RPE or parameter mode.
+- Null and zero watts are reusable results. Missing/failed sample reads are not
+  persisted; local file presence is checked before accepting a hit. Authentication
+  and active-account checks still precede every lookup;
+  neither bearer tokens nor emails identify cache entries.
+
+### Proposed rollout (not executed)
+
+1. Review this local diff. No migration 004 is needed: verify migrations 001–003
+   and the migration-002 metrics lookup index are present using read-only checks.
+   If an environment lacks those prerequisites, review/apply its existing ordered
+   migrations separately with a direct connection before deploying code.
+2. Test an isolated preview with non-production Neon/Blob resources. Compare
+   exact cold/warm outputs, tenant isolation and revocation; measure endpoint
+   timings and sample-read counts across new requests/function instances.
+3. Only after approval, deploy code. Existing users warm lazily on their first
+   selected activity/duration request; no backfill job or upload change. First
+   misses still download samples sequentially and incur cache read/write overhead.
+   New sample/normalizer/algorithm revisions or duration lists create new misses.
+4. Measure repeated Overview refreshes; do not claim production speedup from
+   local tests. Monitor warm SQL latency and append-only snapshot growth/concurrent
+   duplicate misses. Rollback is code-only; older code ignores namespaced snapshots.
+
+**Remaining bottleneck:** weekly HR aggregation is unchanged. Cold curves and
+one SQL lookup per selected activity also remain. Revisit per-activity HR summaries
+or batched cache reads only with the next measurements; no Redis or instance-local
+cache introduced.
+
+**Local verification:** all 177 backend tests passed with PostgreSQL from Docker
+Compose (each integration test uses a temporary schema). Tests prove zero warm
+sample reads across new stores, exact watts/null/order parity, owner isolation,
+account revocation, version invalidation and concurrent reingest provenance.
+Ruff passes for `cycling tests scripts`, changed Python files are formatted, and
+`git diff --check` passes. Repo-wide Ruff still reports pre-existing issues in
+`strava_fetcher/download.py` (imports/format) and `docs/tools.md` (format), untouched.
+
 ## Progress log
 
 | Date | Update |
@@ -131,3 +193,4 @@ Vercel Function limits. If not, move ingestion to a durable worker.
 | 2026-10-02 | Added FIT MIME types `application/fits` and `application/vnd.ant.fit` after the browser upload returned a Vercel Blob content-type mismatch. |
 | 2026-10-02 | Added an accessible dashboard loading status and CSS skeleton; page transitions previously had no `loading.tsx` fallback while server-rendered API requests completed. |
 | 2026-10-02 | Added per-endpoint timing logs, reduced activity catalog hydration from 1+N SQL statements to one owner-scoped query, and streamed Overview panels independently. Persistent caching remains deferred until production timings identify the hot path. |
+| 2026-10-02 | Production timings identified repeated sample reads in period curves and weekly HR training. Implemented revision/duration-aware per-activity MMP snapshots using the existing metrics table, with local correctness, isolation, revocation and reingest tests. No migration or production operation; rollout awaits review. Weekly caching remains deferred. |

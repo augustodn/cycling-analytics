@@ -631,6 +631,131 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("21600", period_watts)
         self.assertIsNone(period_watts["21600"])
 
+    def test_power_curve_cache_reused_by_period_for_custom_durations(self):
+        ident = self.ingest()
+        activity = self.store.activity(ident)
+        self.store.write_activity(
+            ident,
+            {
+                "start_time": activity["start_time"],
+                "elapsed_seconds": 5,
+                "modality": activity["modality"],
+                "quality_flags": [],
+            },
+            [
+                {
+                    "elapsed_s": second,
+                    "segment": 0,
+                    "active": True,
+                    "power_w": 0,
+                }
+                for second in range(5)
+            ],
+        )
+        durations = [5, 3, 7, 5]
+
+        with patch.object(self.store, "samples", wraps=self.store.samples) as samples:
+            single = self.service.power_curve(
+                CurveRequest(activity_id=ident, durations=durations)
+            )
+            period = self.service.period_power_curve(
+                PeriodPowerCurveRequest(period="all", durations=durations)
+            )
+
+        self.assertEqual(samples.call_count, 1)
+        self.assertEqual(single.data["durations_s"], durations)
+        self.assertEqual(period.data["durations_s"], durations)
+        self.assertEqual(list(single.data["watts"]), ["5", "3", "7"])
+        self.assertEqual(list(period.data["watts"]), ["5", "3", "7"])
+        self.assertEqual(single.data["watts"], {"5": 0.0, "3": 0.0, "7": None})
+        self.assertEqual(period.data["watts"], single.data["watts"])
+        self.assertEqual(period.data["records"]["5"]["activity_id"], ident)
+        self.assertEqual(period.data["records"]["3"]["activity_id"], ident)
+        self.assertIsNone(period.data["records"]["7"])
+
+    def test_power_curve_cache_misses_after_stable_path_overwrite(self):
+        ident = self.ingest()
+        original = self.store.activity(ident)
+        request = CurveRequest(activity_id=ident, durations=[5])
+
+        with patch.object(self.store, "samples", wraps=self.store.samples) as samples:
+            before = self.service.power_curve(request)
+            self.store.write_activity(
+                ident,
+                {
+                    "start_time": original["start_time"],
+                    "elapsed_seconds": 5,
+                    "modality": original["modality"],
+                    "quality_flags": [],
+                },
+                [
+                    {
+                        "elapsed_s": second,
+                        "segment": 0,
+                        "active": True,
+                        "power_w": 300,
+                    }
+                    for second in range(5)
+                ],
+            )
+            updated = self.store.activity(ident)
+            after = self.service.power_curve(request)
+
+        self.assertEqual(updated["sample_path"], original["sample_path"])
+        self.assertNotEqual(updated["ingested_at"], original["ingested_at"])
+        self.assertEqual(before.data["watts"]["5"], 200)
+        self.assertEqual(after.data["watts"]["5"], 300)
+        self.assertEqual(samples.call_count, 2)
+
+    def test_power_curve_missing_samples_and_read_errors_are_not_cached(self):
+        ident = self.ingest()
+        activity = self.store.activity(ident)
+        sample_file = self.data / activity["sample_path"]
+        sample_bytes = sample_file.read_bytes()
+        sample_file.unlink()
+        request = CurveRequest(activity_id=ident, durations=[5])
+
+        with patch.object(self.store, "samples", wraps=self.store.samples) as samples:
+            missing = self.service.power_curve(request)
+            self.assertIsNone(missing.data["watts"]["5"])
+            self.assertEqual(self.store.status()["metric_snapshots"], 0)
+
+            sample_file.write_bytes(sample_bytes)
+            restored = self.service.power_curve(request)
+            self.assertEqual(restored.data["watts"]["5"], 200)
+            self.assertEqual(samples.call_count, 2)
+
+            sample_file.unlink()
+            warm_missing = self.service.power_curve(request)
+            self.assertIsNone(warm_missing.data["watts"]["5"])
+            sample_file.write_bytes(sample_bytes)
+            self.assertEqual(self.service.power_curve(request).data["watts"]["5"], 200)
+            self.assertEqual(samples.call_count, 3)
+
+            self.store.db.execute(
+                "UPDATE activities SET sample_path=NULL WHERE id=?", [ident]
+            )
+            self.assertIsNone(self.service.power_curve(request).data["watts"]["5"])
+            self.store.db.execute(
+                "UPDATE activities SET sample_path=? WHERE id=?",
+                [activity["sample_path"], ident],
+            )
+            self.assertEqual(self.service.power_curve(request).data["watts"]["5"], 200)
+            self.assertEqual(samples.call_count, 4)
+
+        unchanged = self.store.activity(ident)
+        self.assertEqual(unchanged["sample_path"], activity["sample_path"])
+        self.assertEqual(unchanged["ingested_at"], activity["ingested_at"])
+        self.assertEqual(self.store.status()["metric_snapshots"], 1)
+
+        with patch.object(
+            self.store, "samples", side_effect=OSError("sample read failed")
+        ) as samples:
+            with self.assertRaisesRegex(OSError, "sample read failed"):
+                self.service.power_curve(CurveRequest(activity_id=ident, durations=[6]))
+        samples.assert_called_once_with(ident)
+        self.assertEqual(self.store.status()["metric_snapshots"], 1)
+
     def test_hr_distribution_single_and_period(self):
         ident = self.ingest()
         res = self.service.hr_distribution(ActivityRequest(activity_id=ident))

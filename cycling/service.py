@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from math import ceil
+from math import ceil, isfinite
 from statistics import median
 from typing import TYPE_CHECKING, Any
 
 from cycling import ALGORITHM_VERSION, analytics
 from cycling.analytics.durability import calculate_fresh_references
+from cycling.analytics.power import _validate_durations
 from cycling.analytics.zones import HR_ZONE_DEFINITIONS
 from cycling.models import (
     ActivityContext,
@@ -200,11 +201,63 @@ class CyclingService:
             },
         )
 
+    def _activity_power_curve(
+        self, activity: dict[str, Any], durations: list[int]
+    ) -> dict[int, float | None]:
+        """Cache MMP values, not mutable activity metadata or endpoint responses."""
+        _validate_durations(durations)
+        revision = {
+            name: activity[name]
+            for name in ("sample_path", "normalizer_version", "ingested_at")
+        }
+        key = encode(
+            [
+                "activity_power_curve:v1",
+                ALGORITHM_VERSION,
+                revision["normalizer_version"],
+                revision["sample_path"],
+                # DuckDB overwrites stable paths; PostgreSQL paths are immutable.
+                revision["ingested_at"],
+                sorted(durations),
+            ]
+        )
+        # Local files are mutable and may disappear without a catalog revision.
+        local_root = getattr(self.store, "root", None)
+        available = local_root is None or (
+            bool(revision["sample_path"])
+            and (local_root / revision["sample_path"]).is_file()
+        )
+        cached = self.store.cached(activity["id"], key) if available else None
+        watts = cached.get("watts") if isinstance(cached, dict) else None
+        if (
+            isinstance(watts, dict)
+            and watts.keys() == {str(d) for d in durations}
+            and all(
+                value is None or (type(value) in (int, float) and isfinite(value))
+                for value in watts.values()
+            )
+        ):
+            return {d: watts[str(d)] for d in durations}
+
+        # Read before save_metrics refreshes the request's pinned sample path.
+        samples = self.store.samples(activity["id"])
+        curve = analytics.power_curve(samples, durations)
+        # Missing local Parquet returns []; never persist that as a negative hit.
+        # ponytail: duplicate misses append snapshots; use an upsert cache if growth matters.
+        if samples:
+            self.store.save_metrics(
+                activity["id"],
+                key,
+                {
+                    "watts": {str(d): value for d, value in curve.items()},
+                    "data": {"activity": revision},
+                },
+            )
+        return curve
+
     def power_curve(self, request: CurveRequest):
         activity = self.store.activity(request.activity_id)
-        curve = analytics.power_curve(
-            self.store.samples(request.activity_id), request.durations
-        )
+        curve = self._activity_power_curve(activity, request.durations)
         return self.result(
             "power_curve",
             {
@@ -232,9 +285,7 @@ class CyclingService:
         }
 
         for activity in activities:
-            curve = analytics.power_curve(
-                self.store.samples(activity["id"]), request.durations
-            )
+            curve = self._activity_power_curve(activity, request.durations)
             for d in request.durations:
                 w = curve.get(d)
                 if w is not None:
