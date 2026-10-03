@@ -1,12 +1,15 @@
 """Semantic tools shared by CLI, HTTP and dashboard adapters."""
 
+from __future__ import annotations
+
 from datetime import UTC, date, datetime, timedelta
-from math import ceil
+from math import ceil, isfinite
 from statistics import median
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cycling import ALGORITHM_VERSION, analytics
 from cycling.analytics.durability import calculate_fresh_references
+from cycling.analytics.power import _validate_durations
 from cycling.analytics.zones import HR_ZONE_DEFINITIONS
 from cycling.models import (
     ActivityContext,
@@ -22,7 +25,10 @@ from cycling.models import (
     StreamRequest,
     ToolResult,
 )
-from cycling.storage import Store, encode, now
+from cycling.storage_utils import encode, now
+
+if TYPE_CHECKING:
+    from cycling.storage import Store
 
 PERIOD_DAYS = {"7d": 7, "21d": 21, "30d": 30, "90d": 90, "365d": 365}
 
@@ -195,11 +201,63 @@ class CyclingService:
             },
         )
 
+    def _activity_power_curve(
+        self, activity: dict[str, Any], durations: list[int]
+    ) -> dict[int, float | None]:
+        """Cache MMP values, not mutable activity metadata or endpoint responses."""
+        _validate_durations(durations)
+        revision = {
+            name: activity[name]
+            for name in ("sample_path", "normalizer_version", "ingested_at")
+        }
+        key = encode(
+            [
+                "activity_power_curve:v1",
+                ALGORITHM_VERSION,
+                revision["normalizer_version"],
+                revision["sample_path"],
+                # DuckDB overwrites stable paths; PostgreSQL paths are immutable.
+                revision["ingested_at"],
+                sorted(durations),
+            ]
+        )
+        # Local files are mutable and may disappear without a catalog revision.
+        local_root = getattr(self.store, "root", None)
+        available = local_root is None or (
+            bool(revision["sample_path"])
+            and (local_root / revision["sample_path"]).is_file()
+        )
+        cached = self.store.cached(activity["id"], key) if available else None
+        watts = cached.get("watts") if isinstance(cached, dict) else None
+        if (
+            isinstance(watts, dict)
+            and watts.keys() == {str(d) for d in durations}
+            and all(
+                value is None or (type(value) in (int, float) and isfinite(value))
+                for value in watts.values()
+            )
+        ):
+            return {d: watts[str(d)] for d in durations}
+
+        # Read before save_metrics refreshes the request's pinned sample path.
+        samples = self.store.samples(activity["id"])
+        curve = analytics.power_curve(samples, durations)
+        # Missing local Parquet returns []; never persist that as a negative hit.
+        # ponytail: duplicate misses append snapshots; use an upsert cache if growth matters.
+        if samples:
+            self.store.save_metrics(
+                activity["id"],
+                key,
+                {
+                    "watts": {str(d): value for d, value in curve.items()},
+                    "data": {"activity": revision},
+                },
+            )
+        return curve
+
     def power_curve(self, request: CurveRequest):
         activity = self.store.activity(request.activity_id)
-        curve = analytics.power_curve(
-            self.store.samples(request.activity_id), request.durations
-        )
+        curve = self._activity_power_curve(activity, request.durations)
         return self.result(
             "power_curve",
             {
@@ -227,9 +285,7 @@ class CyclingService:
         }
 
         for activity in activities:
-            curve = analytics.power_curve(
-                self.store.samples(activity["id"]), request.durations
-            )
+            curve = self._activity_power_curve(activity, request.durations)
             for d in request.durations:
                 w = curve.get(d)
                 if w is not None:
@@ -347,10 +403,26 @@ class CyclingService:
         )
 
     def hr_distribution(self, request: ActivityRequest):
-        _, ident, _ = self.settings(request)
-        distribution = analytics.calculate_hr_zone_distribution(
-            self.store.samples(request.activity_id)
-        )
+        _, ident, parameters = self.settings(request)
+        samples = self.store.samples(request.activity_id)
+        if getattr(self.store, "personalized_hr_zones", False) and parameters is None:
+            distribution = {
+                "basis": "hr",
+                "seconds": [],
+                "percentages": [],
+                "total_seconds": 0,
+                "unknown_seconds": len(analytics.filter_active(samples)),
+                "zones": [],
+                "available": False,
+                "reason": "Configure athlete HR zones before classifying HR time",
+            }
+        else:
+            distribution = analytics.calculate_hr_zone_distribution(
+                samples,
+                parameters
+                if getattr(self.store, "personalized_hr_zones", False)
+                else None,
+            )
         return self.result(
             "hr_distribution",
             {
@@ -369,6 +441,79 @@ class CyclingService:
             request.start_date,
             request.end_date,
         )
+
+        if getattr(self.store, "personalized_hr_zones", False):
+            groups: dict[tuple[float, ...], dict[str, Any]] = {}
+            unknown_seconds = 0
+            known_seconds = 0
+            for activity in activities:
+                activity_request = ActivityRequest(
+                    activity_id=activity["id"],
+                    parameter_mode=request.parameter_mode,
+                )
+                _, parameter_id, parameters = self.settings(activity_request)
+                samples = self.store.samples(activity["id"])
+                if parameters is None:
+                    unknown_seconds += len(analytics.filter_active(samples))
+                    continue
+                distribution = analytics.calculate_hr_zone_distribution(
+                    samples, parameters
+                )
+                key = tuple(float(bound) for bound in parameters.hr_zone_bounds)
+                group = groups.setdefault(
+                    key,
+                    {
+                        "parameter_id": parameter_id,
+                        "zones": distribution["zones"],
+                        "seconds": [0] * len(distribution["seconds"]),
+                        "activity_ids": [],
+                    },
+                )
+                group["activity_ids"].append(activity["id"])
+                group["seconds"] = [
+                    total + current
+                    for total, current in zip(
+                        group["seconds"], distribution["seconds"], strict=True
+                    )
+                ]
+                known_seconds += distribution["total_seconds"]
+                unknown_seconds += distribution["unknown_seconds"]
+
+            grouped = []
+            for group in groups.values():
+                total = sum(group["seconds"])
+                grouped.append(
+                    {
+                        **group,
+                        "total_seconds": total,
+                        "percentages": [
+                            100 * value / total if total else 0.0
+                            for value in group["seconds"]
+                        ],
+                    }
+                )
+            compatible = len(grouped) <= 1
+            one_group = grouped[0] if grouped else None
+            return self.result(
+                "period_hr_distribution",
+                {
+                    "period": request.period,
+                    "modality": request.modality,
+                    "activity_count": len(activities),
+                    "basis": "hr",
+                    "seconds": one_group["seconds"] if compatible and one_group else [],
+                    "percentages": one_group["percentages"]
+                    if compatible and one_group
+                    else [],
+                    "total_seconds": known_seconds,
+                    "unknown_seconds": unknown_seconds,
+                    "zones": one_group["zones"] if compatible and one_group else [],
+                    "activity_ids": [activity["id"] for activity in activities],
+                    "parameter_groups": grouped,
+                    "mixed_zone_boundaries": not compatible,
+                },
+                parameter_mode=request.parameter_mode,
+            )
 
         num_zones = len(HR_ZONE_DEFINITIONS)
         accumulated_seconds = [0] * num_zones
@@ -424,7 +569,15 @@ class CyclingService:
 
         current_week = end_date - timedelta(days=end_date.weekday())
         first_week = current_week - timedelta(days=7 * (weeks - 1))
-        zone_definitions = analytics.calculate_hr_zone_distribution([])["zones"]
+        personalized_zones = getattr(self.store, "personalized_hr_zones", False)
+        weekly_parameters = None
+        if personalized_zones:
+            _, weekly_parameters = self.store.parameters(None, mode="current")
+        zone_definitions = (
+            analytics.calculate_hr_zone_distribution([], weekly_parameters)["zones"]
+            if not personalized_zones or weekly_parameters is not None
+            else []
+        )
         weekly = {
             week_start: {
                 "week_start": week_start.isoformat(),
@@ -452,9 +605,17 @@ class CyclingService:
             if week_start not in weekly or activity_date > end_date:
                 continue
 
-            distribution = analytics.calculate_hr_zone_distribution(
-                self.store.samples(activity["id"])
-            )
+            samples = self.store.samples(activity["id"])
+            if personalized_zones and weekly_parameters is None:
+                distribution = {
+                    "seconds": [],
+                    "unknown_seconds": len(analytics.filter_active(samples)),
+                }
+            else:
+                distribution = analytics.calculate_hr_zone_distribution(
+                    samples,
+                    weekly_parameters if personalized_zones else None,
+                )
             zone_seconds = distribution["seconds"]
             known_hr_seconds = sum(zone_seconds)
             sampled_seconds = known_hr_seconds + distribution["unknown_seconds"]

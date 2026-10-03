@@ -44,10 +44,10 @@ if [[ "$#" -eq 0 ]]; then
 fi
 
 printf '%s\n' '1/3 Downloading original activity files...'
-uv run python strava_fetcher/download.py --output "$DOWNLOAD_DIR" "$@"
+uv run --group local python strava_fetcher/download.py --output "$DOWNLOAD_DIR" "$@"
 
 printf '%s\n' '2/3 Ingesting FIT/TCX files...'
-uv run python -m cycling --data-dir "$DATA_DIR" ingest "$DOWNLOAD_DIR" --new-only
+uv run --group local python -m cycling --data-dir "$DATA_DIR" ingest "$DOWNLOAD_DIR" --new-only
 
 printf '%s\n' '3/3 Starting dashboard...'
-exec uv run python -m cycling --data-dir "$DATA_DIR" dashboard
+exec uv run --group local python -m cycling --data-dir "$DATA_DIR" dashboard

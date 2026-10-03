@@ -95,3 +95,25 @@ def test_hr_distribution_assigns_zone_boundaries():
         "5b Aerobic Capacity",
         "5c Anaerobic",
     ]
+
+
+def test_hr_distribution_uses_each_athletes_declared_boundaries():
+    samples = [
+        {"elapsed_s": index, "active": True, "hr_bpm": hr}
+        for index, hr in enumerate([126, 127, 140, 141, 146, 147, 157, 158, 159])
+    ]
+
+    result = calculate_hr_zone_distribution(
+        samples, DummyParams(hr_zone_bounds=(127, 141, 147, 158))
+    )
+
+    assert result["seconds"] == [1, 2, 2, 2, 2]
+    assert [zone["label"] for zone in result["zones"]] == [
+        "HR Z1",
+        "HR Z2",
+        "HR Z3",
+        "HR Z4",
+        "HR Z5",
+    ]
+    assert result["zones"][0]["hr_range"] == "< 127 bpm"
+    assert result["zones"][-1]["hr_range"] == "≥ 158 bpm"

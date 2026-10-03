@@ -45,9 +45,29 @@ HR_ZONE_DEFINITIONS = (
 
 def calculate_hr_zone_distribution(
     samples: Sequence[Dict[str, Any]],
+    parameters: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Calculate time spent in the configured seven heart-rate zones."""
-    seconds = [0] * len(HR_ZONE_DEFINITIONS)
+    """Calculate HR-zone time; optional athlete bounds override legacy display zones."""
+    personalized = parameters is not None
+    if not personalized:
+        definitions = HR_ZONE_DEFINITIONS
+    else:
+        bounds = list(parameters.hr_zone_bounds)
+        definitions = tuple(
+            (
+                f"HR Z{index + 1}",
+                "Athlete configured",
+                (f"< {upper:g} bpm" if index == 0 else f"{lower:g}–< {upper:g} bpm")
+                if upper is not None
+                else f"≥ {lower:g} bpm",
+                lower,
+                upper,
+            )
+            for index, (lower, upper) in enumerate(
+                zip([0, *bounds], [*bounds, None], strict=True)
+            )
+        )
+    seconds = [0] * len(definitions)
     unknown_seconds = 0
 
     for sample in filter_active(samples):
@@ -60,8 +80,12 @@ def calculate_hr_zone_distribution(
         zone_index = next(
             (
                 index
-                for index, (_, _, _, lower, upper) in enumerate(HR_ZONE_DEFINITIONS)
-                if hr_bpm >= lower and (upper is None or hr_bpm <= upper)
+                for index, (_, _, _, lower, upper) in enumerate(definitions)
+                if hr_bpm >= lower
+                and (
+                    upper is None
+                    or (hr_bpm < upper if personalized else hr_bpm <= upper)
+                )
             ),
             None,
         )
@@ -86,7 +110,7 @@ def calculate_hr_zone_distribution(
                 "percentage_range": percentage_range,
                 "hr_range": hr_range,
             }
-            for label, percentage_range, hr_range, _, _ in HR_ZONE_DEFINITIONS
+            for label, percentage_range, hr_range, _, _ in definitions
         ],
     }
 

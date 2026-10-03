@@ -163,7 +163,7 @@ All successful API and service responses follow the uniform `ToolResult` envelop
 ## Adapter Interfaces
 
 ### 1. Command Line Interface (Standard `argparse`)
-Executed via `python -m cycling <command>` (or `uv run python -m cycling <command>`):
+Executed via `python -m cycling <command>` (or `uv run --group local python -m cycling <command>`):
 
 ```bash
 # Global option
