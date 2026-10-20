@@ -237,8 +237,9 @@ def weekly_cycling_training(
     store: StoreDep,
     end: Annotated[date, Query(default_factory=lambda: datetime.now(UTC).date())],
     weeks: Annotated[int, Query(ge=1, le=104)] = 12,
+    parameter_mode: str = Query(default="historical", pattern="^(historical|current)$"),
 ):
-    return CyclingService(store).weekly_cycling_training(end, weeks)
+    return CyclingService(store).weekly_cycling_training(end, weeks, parameter_mode)
 
 
 @app.get("/api/v1/power-hr-zone-mismatch", response_model=ToolResult)

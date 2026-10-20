@@ -342,6 +342,12 @@ class DashboardTests(unittest.TestCase):
                     "total_seconds": 3600,
                     "hr_zone_seconds": [1] * 7,
                     "unclassified_seconds": 3593,
+                    "load_total": 100,
+                    "load_power": 60,
+                    "load_hr": 40,
+                    "load_power_activity_count": 1,
+                    "load_hr_activity_count": 1,
+                    "load_unavailable_activity_count": 0,
                 }
             ],
             "zones": zones,
@@ -358,6 +364,14 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(colors["5b Aerobic Capacity"], "#FF0000")
         self.assertEqual(colors["5c Anaerobic"], "#8A2BE2")
         self.assertEqual(colors["Unclassified / no HR"], "#D3D3D3")
+        load_trace = next(
+            trace
+            for trace in figure.data
+            if trace.name == "Training load (power + HR estimate)"
+        )
+        self.assertEqual(load_trace.yaxis, "y2")
+        self.assertEqual(list(load_trace.y), [100])
+        self.assertEqual(list(load_trace.customdata[0]), [60, 40, 1, 1, 0])
 
     def test_hr_distribution_uses_weekly_training_zone_colors(self):
         import plotly.graph_objects as go

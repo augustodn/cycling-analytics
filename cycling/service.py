@@ -861,10 +861,14 @@ class CyclingService:
             parameter_mode=request.parameter_mode,
         )
 
-    def weekly_cycling_training(self, end_date: date, weeks: int = 12):
-        """Aggregate weekly cycling time and fixed HR-zone exposure."""
+    def weekly_cycling_training(
+        self, end_date: date, weeks: int = 12, parameter_mode: str = "historical"
+    ):
+        """Aggregate weekly cycling time, HR zones, and power/HR load points."""
         if weeks < 1:
             raise ValueError("weeks must be at least one")
+        if parameter_mode not in {"historical", "current"}:
+            raise ValueError("parameter_mode must be historical or current")
 
         current_week = end_date - timedelta(days=end_date.weekday())
         first_week = current_week - timedelta(days=7 * (weeks - 1))
@@ -885,6 +889,11 @@ class CyclingService:
                 "total_seconds": 0.0,
                 "hr_zone_seconds": [0] * len(zone_definitions),
                 "unclassified_seconds": 0.0,
+                "load_power": 0.0,
+                "load_hr": 0.0,
+                "load_power_activity_count": 0,
+                "load_hr_activity_count": 0,
+                "load_unavailable_activity_count": 0,
             }
             for week_start in (
                 first_week + timedelta(days=7 * index) for index in range(weeks)
@@ -905,6 +914,11 @@ class CyclingService:
                 continue
 
             samples = self.store.samples(activity["id"])
+            parameter_date = None if parameter_mode == "current" else activity_date
+            _, load_parameters = self.store.parameters(
+                parameter_date, mode=parameter_mode
+            )
+            load = analytics.calculate_session_load(samples, load_parameters)
             if personalized_zones and weekly_parameters is None:
                 distribution = {
                     "seconds": [],
@@ -932,6 +946,23 @@ class CyclingService:
                 )
             ]
             bucket["unclassified_seconds"] += activity_seconds - known_hr_seconds
+            load_source = load["source"]
+            if load_source in {"power", "hr"}:
+                bucket[f"load_{load_source}"] += load["value"]
+                bucket[f"load_{load_source}_activity_count"] += 1
+            else:
+                bucket["load_unavailable_activity_count"] += 1
+
+        for bucket in weekly.values():
+            load_count = (
+                bucket["load_power_activity_count"]
+                + bucket["load_hr_activity_count"]
+            )
+            bucket["load_total"] = (
+                bucket["load_power"] + bucket["load_hr"]
+                if load_count or not bucket["activity_count"]
+                else None
+            )
 
         return self.result(
             "weekly_cycling_training",
@@ -940,6 +971,7 @@ class CyclingService:
                 "end_date": end_date.isoformat(),
                 "weeks": list(weekly.values()),
                 "zones": zone_definitions,
+                "parameter_mode": parameter_mode,
             },
         )
 

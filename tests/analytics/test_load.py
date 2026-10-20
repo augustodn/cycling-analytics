@@ -4,7 +4,10 @@ from dataclasses import dataclass
 
 import pytest
 
-from cycling.analytics.load import calculate_session_load
+from cycling.analytics.load import (
+    calculate_session_load,
+    calibrate_hr_load_factor,
+)
 
 
 @dataclass
@@ -52,6 +55,27 @@ def test_training_load_hr_calibration_factor():
     assert res["source"] == "hr"
     assert pytest.approx(res["value"], rel=1e-5) == 69.2
     assert "calibrated factor=0.692" in res["reason"]
+
+
+def test_calibrate_hr_load_factor_uses_robust_multiplicative_median():
+    assert calibrate_hr_load_factor(
+        [50, 50, 50, 400], [100, 100, 100, 100]
+    ) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("power_loads", "hr_loads"),
+    [
+        ([1], []),
+        ([0], [1]),
+        ([1], [float("nan")]),
+        ([1e308], [1e-308]),
+        ([], []),
+    ],
+)
+def test_calibrate_hr_load_factor_rejects_invalid_pairs(power_loads, hr_loads):
+    with pytest.raises(ValueError):
+        calibrate_hr_load_factor(power_loads, hr_loads)
 
 
 def test_training_load_rpe_fallback():

@@ -7,7 +7,11 @@ Exposes pure mathematical functions and typed structures for analyzing
 from cycling.analytics.concordance import analyze_power_hr_windows
 from cycling.analytics.drift import aerobic_drift
 from cycling.analytics.durability import calculate_aerobic_durability, durability
-from cycling.analytics.load import calculate_session_load, training_load
+from cycling.analytics.load import (
+    calculate_session_load,
+    calibrate_hr_load_factor,
+    training_load,
+)
 from cycling.analytics.pipeline import analyze
 from cycling.analytics.power import (
     calculate_if,
@@ -88,6 +92,7 @@ __all__ = [
     "training_load",
     # Specific Functions
     "calculate_session_load",
+    "calibrate_hr_load_factor",
     "calculate_zone_seconds",
     "calculate_hr_zone_distribution",
     "calculate_weekly_composition",

@@ -156,10 +156,12 @@ def _cached_progress(data_dir: str, request_json: str) -> dict:
 
 
 @st.cache_data(ttl=300, max_entries=8, show_spinner=False)
-def _cached_weekly_cycling_training(data_dir: str, end_date: str) -> dict:
+def _cached_weekly_cycling_training(
+    data_dir: str, end_date: str, parameter_mode: str
+) -> dict:
     with Store(data_dir) as store:
         result = CyclingService(store).weekly_cycling_training(
-            date.fromisoformat(end_date)
+            date.fromisoformat(end_date), parameter_mode=parameter_mode
         )
         return result.model_dump(mode="json")
 
@@ -605,13 +607,42 @@ def _weekly_training_figure(go, data: dict):
             "<br>Total cycling: %{customdata[0]:.2f} h<extra></extra>"
         ),
     )
+    figure.add_scatter(
+        x=labels,
+        y=[week.get("load_total") for week in weeks],
+        mode="lines+markers",
+        name="Training load (power + HR estimate)",
+        yaxis="y2",
+        customdata=[
+            [
+                week.get("load_power", 0),
+                week.get("load_hr", 0),
+                week.get("load_power_activity_count", 0),
+                week.get("load_hr_activity_count", 0),
+                week.get("load_unavailable_activity_count", 0),
+            ]
+            for week in weeks
+        ],
+        hovertemplate=(
+            "%{x}<br>Training load: %{y:.0f} points"
+            "<br>Power load: %{customdata[0]:.0f} (%{customdata[2]} rides)"
+            "<br>HR estimate: %{customdata[1]:.0f} (%{customdata[3]} rides)"
+            "<br>Unavailable: %{customdata[4]} rides<extra></extra>"
+        ),
+    )
     figure.update_layout(
         barmode="stack",
-        title="Weekly Cycling Hours and HR Zones (Last 12 Weeks)",
+        title="Weekly Cycling Hours, HR Zones and Training Load (Last 12 Weeks)",
         xaxis_title="ISO week",
         yaxis_title="Training time (hours)",
         yaxis={"rangemode": "tozero"},
-        legend_title="Heart rate zone",
+        yaxis2={
+            "title": "Training load (TSS scale)",
+            "overlaying": "y",
+            "side": "right",
+            "rangemode": "tozero",
+        },
+        legend_title="Training metric",
     )
     return figure
 
@@ -1768,11 +1799,13 @@ def run():
             st.subheader("Weekly Cycling Training")
             st.caption(
                 "All cycling modalities combined. HR-zone segments use the same zones "
-                "as Heart Rate Distribution; remainder includes time without classified HR."
+                "as Heart Rate Distribution; remainder includes time without classified HR. "
+                "Training load uses power when available and calibrated HR otherwise; "
+                "HR values are estimates, not physiological certainty."
             )
             try:
                 training_payload = _cached_weekly_cycling_training(
-                    settings.data_dir, end.isoformat()
+                    settings.data_dir, end.isoformat(), mode
                 )
                 st.plotly_chart(
                     _weekly_training_figure(go, training_payload["data"]),

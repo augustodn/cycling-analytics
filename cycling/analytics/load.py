@@ -36,6 +36,7 @@ Formulas & Principles:
 
 import math
 from datetime import date, timedelta
+from statistics import median
 from typing import Any, Dict, List, Optional, Sequence
 
 from cycling.analytics.power import calculate_np
@@ -130,6 +131,35 @@ def calculate_session_load(
         unit=None,
         reason="power, HR and RPE load evidence insufficient",
     ).to_dict()
+
+
+def calibrate_hr_load_factor(
+    power_loads: Sequence[float], hr_loads: Sequence[float]
+) -> float:
+    """Estimate factor as the robust geometric median of paired load ratios."""
+    if len(power_loads) != len(hr_loads):
+        raise ValueError("power_loads and hr_loads must have the same length")
+
+    ratios = []
+    for power_load, hr_load in zip(power_loads, hr_loads, strict=True):
+        if (
+            not _is_finite_number(power_load)
+            or not _is_finite_number(hr_load)
+            or power_load <= 0
+            or hr_load <= 0
+        ):
+            raise ValueError("paired loads must be finite and greater than zero")
+        ratios.append(math.log(power_load) - math.log(hr_load))
+
+    if not ratios:
+        raise ValueError("at least one paired load is required")
+    median_log_ratio = median(ratios)
+    if median_log_ratio > math.log(5):
+        raise ValueError("calibrated factor must be finite and in (0, 5]")
+    factor = math.exp(median_log_ratio)
+    if not math.isfinite(factor) or not 0 < factor <= 5:
+        raise ValueError("calibrated factor must be finite and in (0, 5]")
+    return factor
 
 
 def training_load(

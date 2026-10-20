@@ -521,6 +521,54 @@ class ServiceTests(unittest.TestCase):
             sum(week["hr_zone_seconds"]) + week["unclassified_seconds"],
         )
 
+    def test_weekly_cycling_training_uses_calibrated_hr_load_fallback(self):
+        self.store.add_parameters(
+            AthleteParameters(
+                effective_date=date(2026, 1, 1),
+                ftp_w=200,
+                lthr_bpm=160,
+                hr_load_factor=0.75,
+            )
+        )
+        self.store.write_activity(
+            "hr-only-ride",
+            {
+                "start_time": "2026-01-07T12:00:00Z",
+                "elapsed_seconds": 3600,
+                "modality": "road",
+                "quality_flags": [],
+            },
+            [
+                {
+                    "elapsed_s": second,
+                    "segment": 0,
+                    "active": True,
+                    "power_w": None,
+                    "hr_bpm": 160,
+                    "cadence_rpm": 90,
+                }
+                for second in range(3600)
+            ],
+        )
+
+        result = self.service.weekly_cycling_training(
+            date(2026, 1, 8), parameter_mode="historical"
+        )
+
+        week = next(row for row in result.data["weeks"] if row["activity_count"])
+        self.assertAlmostEqual(week["load_total"], 75.0)
+        self.assertAlmostEqual(week["load_hr"], 75.0)
+        self.assertEqual(week["load_hr_activity_count"], 1)
+        self.assertEqual(week["load_power_activity_count"], 0)
+        self.assertEqual(week["load_unavailable_activity_count"], 0)
+        self.assertEqual(result.data["parameter_mode"], "historical")
+
+    def test_weekly_cycling_training_validates_parameter_mode(self):
+        with self.assertRaisesRegex(ValueError, "parameter_mode"):
+            self.service.weekly_cycling_training(
+                date(2026, 1, 8), parameter_mode="invalid"
+            )
+
     def test_power_hr_zone_mismatch_aggregates_valid_evidence_by_environment(self):
         self.store.add_parameters(
             AthleteParameters(effective_date=date(2026, 1, 2), ftp_w=260)
