@@ -45,14 +45,14 @@ def discover_sources(root: Path | str = DEFAULT_DOWNLOADS_DIR) -> list[Path]:
     return sorted(found)
 
 
-def audit_download_state(root: Path) -> dict:
+def audit_download_state(root: Path, ignored_paths: set[str] | None = None) -> dict:
     """Read acquisition evidence separately; never treat its dates as canonical."""
     state = root / ".state.json"
     if not state.is_file():
         return {"available": False}
     try:
         records = json.loads(state.read_text())["activities"]
-        missing, failed = [], []
+        missing, failed, ignored = [], [], []
         for ident, record in records.items():
             if record.get("status") != "downloaded":
                 failed.append(
@@ -76,13 +76,18 @@ def audit_download_state(root: Path) -> dict:
                 ).resolve()
             else:
                 path = (root / reference).resolve()
-            if root in path.parents and not path.is_file():
-                missing.append({"strava_id": ident, "path": str(path)})
+            if root in path.parents:
+                item = {"strava_id": ident, "path": str(path)}
+                if ignored_paths and str(path) in ignored_paths:
+                    ignored.append({**item, "reason": "duplicate"})
+                elif not path.is_file():
+                    missing.append(item)
         return {
             "available": True,
             "records": len(records),
             "failed_records": failed,
             "missing_downloads": missing,
+            "ignored_downloads": ignored,
         }
     except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
         return {"available": False, "error": f"Cannot audit downloader state: {exc}"}
@@ -97,10 +102,19 @@ def ingest(
     files = discover_sources(root)
     result = {"discovered": len(files), "ingested": 0, "skipped": 0, "errors": []}
     seen = set()
+    ignored_paths = {
+        row[0]
+        for row in store.db.execute(
+            "SELECT path FROM sources WHERE status='ignored_duplicate'"
+        ).fetchall()
+    }
 
     for path in files:
         path = path.resolve()
         seen.add(str(path))
+        if str(path) in ignored_paths:
+            result["skipped"] += 1
+            continue
         digest, size = None, None
         try:
             size = path.stat().st_size
@@ -151,6 +165,7 @@ def ingest(
         if (
             (path_item == root or root in path_item.parents)
             and str(path_item) not in seen
+            and str(path_item) not in ignored_paths
             and not path_item.exists()
         ):
             store.source(
@@ -158,7 +173,7 @@ def ingest(
             )
 
     if root.is_dir():
-        audit = audit_download_state(root)
+        audit = audit_download_state(root, ignored_paths)
         for item in audit.get("missing_downloads", []):
             path_item = Path(item["path"])
             existing = store.db.execute(

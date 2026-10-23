@@ -35,6 +35,10 @@ def parser():
         action="store_true",
         help="Ingest new files only (default behavior)",
     )
+    source = commands.add_parser("source").add_subparsers(
+        dest="action", required=True
+    )
+    source.add_parser("ignore-duplicate").add_argument("path", type=Path)
     activities_list = (
         commands.add_parser("activities")
         .add_subparsers(dest="action", required=True)
@@ -270,6 +274,8 @@ def main(argv=None):
             }
             if command == "ingest":
                 result = ingest(store, args.source, args.force)
+            elif command == "source":
+                result = service.ignore_duplicate_source(args.path)
             elif command == "activities":
                 result = service.list_activities()
                 if args.action == "list":
