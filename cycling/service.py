@@ -1405,6 +1405,11 @@ class CyclingService:
     def status(self):
         return self.result("status", self.store.status())
 
+    def ignore_duplicate_source(self, path):
+        return self.result(
+            "ignore_duplicate_source", self.store.ignore_duplicate_source(path)
+        )
+
     def set_context(self, activity_id: str, context: ActivityContext):
         context_id = self.store.set_context(activity_id, context)
         return self.result(

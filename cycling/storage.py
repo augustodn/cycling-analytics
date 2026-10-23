@@ -187,6 +187,18 @@ class Store:
             [str(path), digest, size, status, error, now()],
         )
 
+    def ignore_duplicate_source(self, path: str | Path):
+        path = Path(path).resolve()
+        row = self.db.execute(
+            "SELECT hash, size, status FROM sources WHERE path=?", [str(path)]
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Source not found: {path}")
+        if row[2] not in {"missing", "ignored_duplicate"}:
+            raise ValueError("Only missing sources can be marked as ignored duplicates")
+        self.source(path, row[0], row[1], "ignored_duplicate")
+        return {"path": str(path), "status": "ignored_duplicate", "reason": "duplicate"}
+
     def activity(self, ident: str):
         row = self.db.execute(
             "SELECT id, source_hash, strava_id_hint, start_time, duration_s, modality, metadata, sample_path, normalizer_version, ingested_at FROM activities WHERE id = ?",

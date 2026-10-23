@@ -282,6 +282,30 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(len(audit["failed_records"]), 1)
         self.assertEqual(state.read_text(), original)
 
+    def test_ignored_duplicate_source_stays_ignored_when_file_reappears(self):
+        source_root = self.root / "duplicate-sources"
+        source_root.mkdir()
+        missing_path = source_root / "duplicate.tcx"
+        state = source_root / ".state.json"
+        original = json.dumps(
+            {"activities": {"12345678": {"status": "downloaded", "result": "duplicate.tcx"}}}
+        )
+        state.write_text(original)
+
+        first = ingest(self.store, source_root)
+        self.assertEqual(len(first["acquisition_state"]["missing_downloads"]), 1)
+        self.service.ignore_duplicate_source(missing_path)
+
+        missing_path.write_text(tcx_text())
+        result = ingest(self.store, source_root, force=True)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(self.store.status()["activities"], 0)
+        self.assertEqual(self.store.status()["source_counts"], {"ignored_duplicate": 1})
+        audit = self.store.status()["acquisition_audits"][0]
+        self.assertEqual(audit["missing_downloads"], [])
+        self.assertEqual(audit["ignored_downloads"][0]["reason"], "duplicate")
+        self.assertEqual(state.read_text(), original)
+
     def test_cli_module_entrypoint(self):
         # A subprocess cannot share a DuckDB writer; use its own disposable catalog.
         directory = str(self.root / "cli-data")
