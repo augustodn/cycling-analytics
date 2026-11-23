@@ -72,9 +72,9 @@ Rides are categorized into a 3-zone model based on Iñigo San Millán polarized 
 
 | Zone | Power Boundary (Default: 80%, 100% FTP) | HR Boundary (Default: 87%, 100% LTHR) | Description |
 |---|---|---|---|
-| **Zone 1 (Low)** | $< 80\% \text{ FTP}$ | $< 87\% \text{ LTHR } (< 137\,\text{bpm})$ | Aerobic / Base / Zone 2 |
-| **Zone 2 (Mid)** | $80\% - 100\% \text{ FTP}$ | $87\% - 100\% \text{ LTHR } (137-157\,\text{bpm})$ | Tempo / Sweet Spot / Threshold |
-| **Zone 3 (High)**| $\ge 100\% \text{ FTP}$ | $\ge 100\% \text{ LTHR } (\ge 157\,\text{bpm})$ | High Intensity / Sub-threshold / VO2max |
+| **Zone 1 (Low)** | $< 80\% \text{ FTP}$ | $< 87\% \text{ LTHR } (< 136\,\text{bpm})$ | Aerobic / Base / Zone 2 |
+| **Zone 2 (Mid)** | $80\% - 100\% \text{ FTP}$ | $87\% - 100\% \text{ LTHR } (136-<156\,\text{bpm})$ | Tempo / Sweet Spot / Threshold |
+| **Zone 3 (High)**| $\ge 100\% \text{ FTP}$ | $\ge 100\% \text{ LTHR } (\ge 156\,\text{bpm})$ | High Intensity / Sub-threshold / VO2max |
 
 Time spent in active cells is binned strictly into Zone 1 ($< b_1$), Zone 2 ($b_1 \le V < b_2$), or Zone 3 ($V \ge b_2$). Primary basis is power if active power exists, falling back to heart rate if no power is recorded.
 

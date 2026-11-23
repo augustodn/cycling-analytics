@@ -61,7 +61,7 @@ export function ProfileForm({ current }: { current?: Parameters }) {
     <label>LTHR (bpm)<input name="lthr_bpm" type="number" min="1" max="240" step="1" defaultValue={current?.lthr_bpm} required /></label>
     <label>Maximum HR (bpm)<input name="max_hr_bpm" type="number" min="1" max="250" step="1" defaultValue={current?.max_hr_bpm} required /></label>
     <label>Weight (kg)<input name="weight_kg" type="number" min="1" max="300" step="0.1" defaultValue={current?.weight_kg} required /></label>
-    <label>HR zone upper bounds (bpm, comma-separated)<input name="hr_zone_bounds" placeholder="127, 141, 147, 158" defaultValue={current?.hr_zone_bounds.join(", ")} required /></label>
+    <label>HR zone cutoffs (bpm, first value in next zone)<input name="hr_zone_bounds" placeholder="129, 137, 146, 157, 161" defaultValue={current?.hr_zone_bounds.join(", ")} required /></label>
     <label>Power zone fractions (comma-separated)<input name="power_zone_fractions" defaultValue={current?.power_zone_fractions.join(", ") ?? "0.55, 0.75, 0.90, 1.05, 1.20"} required /></label>
     <label>CTL days<input name="ctl_days" type="number" min="1" max="365" step="1" defaultValue={current?.ctl_days ?? 42} required /></label>
     <label>ATL days<input name="atl_days" type="number" min="1" max="365" step="1" defaultValue={current?.atl_days ?? 7} required /></label>

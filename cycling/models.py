@@ -14,12 +14,12 @@ class Contract(BaseModel):
 class AthleteParameters(Contract):
     effective_date: date = date(2026, 1, 1)
     ftp_w: float = Field(default=285, gt=0, le=1000)
-    lthr_bpm: float = Field(default=155, gt=0, le=240)
+    lthr_bpm: float = Field(default=156, gt=0, le=240)
     hr_load_factor: float = Field(default=1.0, gt=0, le=5)
     max_hr_bpm: float = Field(default=181, gt=0, le=250)
     weight_kg: float = Field(default=75, gt=0, le=300)
     power_zone_fractions: list[float] = [0.55, 0.75, 0.90, 1.05, 1.20]
-    hr_zone_bounds: list[float] = [127, 141, 147, 158]
+    hr_zone_bounds: list[float] = [129, 137, 146, 157, 161]
     power_three_zone_fractions: list[float] = [0.80, 1.0]
     hr_three_zone_fractions: list[float] = [0.87, 1.0]
     ctl_days: float = Field(default=42, ge=1, le=365)

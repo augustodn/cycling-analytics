@@ -100,11 +100,11 @@ All successful API and service responses follow the uniform `ToolResult` envelop
     "declared_parameters": {
       "effective_date": "2026-01-01",
       "ftp_w": 285.0,
-      "lthr_bpm": 157.0,
+      "lthr_bpm": 156.0,
       "max_hr_bpm": 181.0,
       "weight_kg": 75.0,
       "power_zone_fractions": [0.55, 0.75, 0.9, 1.05, 1.2],
-      "hr_zone_bounds": [127.0, 141.0, 147.0, 158.0],
+      "hr_zone_bounds": [129.0, 137.0, 146.0, 157.0, 161.0],
       "power_three_zone_fractions": [0.8, 1.0],
       "hr_three_zone_fractions": [0.87, 1.0],
       "ctl_days": 42.0,

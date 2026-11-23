@@ -4,7 +4,7 @@
 - **Age:** 40
 - **Sex:** Male
 - **FTP:** 285W
-- **Threshold HR:** 157 bpm
+- **Threshold HR:** 156 bpm
 - **Weight:** 75 kg
 - **Weekly Training Time:** ~8-10 hrs
 - **Workout Days:** Monday, Tuesday, Wednesday, Thursday, Friday, Saturday
@@ -18,14 +18,15 @@
 - **Strategy:** Reduce power to stay in Zone 2, avoid intensity creep
 - **Post-HIIT Nutrition:** Carbs intake after high-intensity sessions
 
-## Heart Rate Zones (based on 181 bpm max)
+## Heart Rate Zones
 | Zone | HR Range (bpm) |
 |------|----------------|
-| Zone 1 | < 127   |
-| Zone 2 | 127-140 |
-| Zone 3 | 141-146 |
-| Zone 4 | 147-157 |
-| Zone 5 | > 158   |
+| Zone 1 | ≤ 128 |
+| Zone 2 | 129-136 |
+| Zone 3 | 137-145 |
+| Zone 4 | 146-156 |
+| Zone 5a | 157-160 |
+| Zone 5b+ | ≥ 161 |
 
 ## Training Preferences
 - High cadence in Zone 2 (90-100 rpm)

@@ -159,9 +159,31 @@ def _cached_progress(data_dir: str, request_json: str) -> dict:
 def _cached_weekly_cycling_training(
     data_dir: str, end_date: str, parameter_mode: str
 ) -> dict:
+    end = date.fromisoformat(end_date)
+    current_week = end - timedelta(days=end.weekday())
     with Store(data_dir) as store:
+        cycling_modalities = {"indoor", "road", "mtb", "gravel"}
+        activity_dates = [
+            date.fromisoformat(activity["start_time"][:10])
+            for activity in store.activities()
+            if activity.get("sport") == "cycling"
+            or activity.get("modality", "unknown") in cycling_modalities
+        ]
+        first_activity_week = min(
+            (
+                activity_date - timedelta(days=activity_date.weekday())
+                for activity_date in activity_dates
+                if activity_date <= end
+            ),
+            default=None,
+        )
+        weeks = (
+            max(1, (current_week - first_activity_week).days // 7 + 1)
+            if first_activity_week is not None
+            else 12
+        )
         result = CyclingService(store).weekly_cycling_training(
-            date.fromisoformat(end_date), parameter_mode=parameter_mode
+            end, weeks=weeks, parameter_mode=parameter_mode
         )
         return result.model_dump(mode="json")
 
@@ -580,39 +602,43 @@ def _render_power_skills(
 def _weekly_training_figure(go, data: dict):
     weeks = data.get("weeks", [])
     labels = [week["iso_week"] for week in weeks]
+    week_starts = [week["week_start"] for week in weeks]
     total_hours = [week["total_seconds"] / 3600 for week in weeks]
     figure = go.Figure()
 
     for zone_index, zone in enumerate(data.get("zones", [])):
         figure.add_bar(
-            x=labels,
+            x=week_starts,
             y=[week["hr_zone_seconds"][zone_index] / 3600 for week in weeks],
             name=zone["label"],
             marker_color=HR_ZONE_COLORS[zone["label"]],
             customdata=[[hours] for hours in total_hours],
+            text=labels,
             hovertemplate=(
-                "%{x}<br>%{fullData.name}: %{y:.2f} h"
+                "%{text}<br>%{fullData.name}: %{y:.2f} h"
                 "<br>Total cycling: %{customdata[0]:.2f} h<extra></extra>"
             ),
         )
 
     figure.add_bar(
-        x=labels,
+        x=week_starts,
         y=[week["unclassified_seconds"] / 3600 for week in weeks],
         name="Unclassified / no HR",
         marker_color=UNCLASSIFIED_HR_COLOR,
         customdata=[[hours] for hours in total_hours],
+        text=labels,
         hovertemplate=(
-            "%{x}<br>%{fullData.name}: %{y:.2f} h"
+            "%{text}<br>%{fullData.name}: %{y:.2f} h"
             "<br>Total cycling: %{customdata[0]:.2f} h<extra></extra>"
         ),
     )
     figure.add_scatter(
-        x=labels,
+        x=week_starts,
         y=[week.get("load_total") for week in weeks],
         mode="lines+markers",
         name="Training load (power + HR estimate)",
         yaxis="y2",
+        text=labels,
         customdata=[
             [
                 week.get("load_power", 0),
@@ -624,7 +650,7 @@ def _weekly_training_figure(go, data: dict):
             for week in weeks
         ],
         hovertemplate=(
-            "%{x}<br>Training load: %{y:.0f} points"
+            "%{text}<br>Training load: %{y:.0f} points"
             "<br>Power load: %{customdata[0]:.0f} (%{customdata[2]} rides)"
             "<br>HR estimate: %{customdata[1]:.0f} (%{customdata[3]} rides)"
             "<br>Unavailable: %{customdata[4]} rides<extra></extra>"
@@ -632,7 +658,7 @@ def _weekly_training_figure(go, data: dict):
     )
     figure.update_layout(
         barmode="stack",
-        title="Weekly Cycling Hours, HR Zones and Training Load (Last 12 Weeks)",
+        title="Weekly Cycling Hours, HR Zones and Training Load",
         xaxis_title="ISO week",
         yaxis_title="Training time (hours)",
         yaxis={"rangemode": "tozero"},
@@ -644,6 +670,19 @@ def _weekly_training_figure(go, data: dict):
         },
         legend_title="Training metric",
     )
+    if weeks:
+        visible_start = weeks[max(0, len(weeks) - 12)]["week_start"]
+        visible_end = (
+            date.fromisoformat(weeks[-1]["week_start"]) + timedelta(days=7)
+        ).isoformat()
+        figure.update_xaxes(
+            type="date",
+            range=[visible_start, visible_end],
+            tickmode="array",
+            tickvals=week_starts,
+            ticktext=labels,
+            rangeslider={"visible": len(weeks) > 12, "thickness": 0.08},
+        )
     return figure
 
 
@@ -1801,7 +1840,8 @@ def run():
                 "All cycling modalities combined. HR-zone segments use the same zones "
                 "as Heart Rate Distribution; remainder includes time without classified HR. "
                 "Training load uses power when available and calibrated HR otherwise; "
-                "HR values are estimates, not physiological certainty."
+                "HR values are estimates, not physiological certainty. The chart opens "
+                "on the latest 12 weeks; drag the lower slider to browse older weeks."
             )
             try:
                 training_payload = _cached_weekly_cycling_training(

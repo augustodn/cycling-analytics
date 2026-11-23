@@ -117,11 +117,11 @@ CREATE TABLE parameters (
 #### Athlete Parameters Contract (`AthleteParameters` JSON Structure):
 - `effective_date`: Date string (default `2026-01-01`)
 - `ftp_w`: Float (default `285.0`)
-- `lthr_bpm`: Float (default `157.0`)
+- `lthr_bpm`: Float (default `156.0`)
 - `max_hr_bpm`: Float (default `181.0`)
 - `weight_kg`: Float (default `75.0`)
 - `power_zone_fractions`: List of Floats (default `[0.55, 0.75, 0.90, 1.05, 1.20]`)
-- `hr_zone_bounds`: List of Floats (default `[127.0, 141.0, 147.0, 158.0]`)
+- `hr_zone_bounds`: List of Floats (default `[129.0, 137.0, 146.0, 157.0, 161.0]`)
 - `power_three_zone_fractions`: List of Floats (default `[0.80, 1.0]`)
 - `hr_three_zone_fractions`: List of Floats (default `[0.87, 1.0]`)
 - `ctl_days`: Float (default `42.0`)

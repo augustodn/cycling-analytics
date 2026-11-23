@@ -156,7 +156,7 @@ and can only be repaired by re-ingesting an original file that contains HR.
 
 ## Declared athlete settings
 
-Initial profile defaults: FTP 285 W, LTHR 155 bpm, max HR 181 bpm, weight 75 kg,
+Initial profile defaults: FTP 285 W, LTHR 156 bpm, max HR 181 bpm, weight 75 kg,
 effective **2026-01-01**. These are declared assumptions, not historical measurements.
 Historical mode selects settings effective on the activity's UTC date. Current mode
 uses settings effective today. Earlier recordings have no threshold-based metrics
@@ -165,8 +165,9 @@ until you declare suitable settings. Estimates never change settings automatical
 Create a JSON file, for example `settings.json`:
 
 ```json
-{"effective_date": "2026-09-01", "ftp_w": 295, "lthr_bpm": 155,
+{"effective_date": "2026-09-01", "ftp_w": 295, "lthr_bpm": 156,
   "hr_load_factor": 0.692, "max_hr_bpm": 181, "weight_kg": 75,
+  "hr_zone_bounds": [129, 137, 146, 157, 161],
   "notes": "Declared FTP update"}
 ```
 
